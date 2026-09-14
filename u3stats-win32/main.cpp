@@ -21,7 +21,15 @@ constexpr UINT WM_APP_SNAPSHOT = WM_APP + 1;
 constexpr UINT WM_APP_ACTION = WM_APP + 2;
 
 enum : int { IDC_RESCAN = 100, IDC_NEXT, IDC_TOPMOST, IDC_RAW, IDC_RAWEDIT };
-enum : int { IDM_QUIT = 200, IDM_FOOD, IDM_POOL_BASE = 210 };  // IDM_POOL_BASE + party member
+enum : int {
+    IDM_QUIT = 200,
+    IDM_FOOD,
+    IDM_FASTER,
+    IDM_SLOWER,
+    IDM_PAUSE,
+    IDM_NORMAL,
+    IDM_POOL_BASE = 210,  // IDM_POOL_BASE + party member
+};
 
 // Requests handed to the worker thread; pooling adds the member index.
 constexpr int ACTION_FOOD = 1;
@@ -37,6 +45,13 @@ const COLORREF COL_GOOD = RGB(0, 128, 0);
 const COLORREF COL_POISONED = RGB(170, 110, 0);
 const COLORREF COL_DEAD = RGB(192, 0, 0);
 const COLORREF COL_ASHES = RGB(110, 110, 110);
+const COLORREF COL_SPEED_CHANGED = RGB(170, 110, 0);
+const COLORREF COL_SPEED_PAUSED = RGB(0, 90, 180);
+
+// Idle waits offered by the Game speed menu, fastest first.
+const int PASS_STEPS[] = {1, 2, 3, u3::NORMAL_PASS_SECONDS, 10, 15, 30, u3::MAX_PASS_SECONDS};
+constexpr int STEP_COUNT = sizeof PASS_STEPS / sizeof PASS_STEPS[0];
+constexpr int NORMAL_STEP = 3;
 
 struct Snapshot {
     bool ok = false;
@@ -45,6 +60,7 @@ struct Snapshot {
     DWORD pid = 0;
     uint64_t address = 0;
     size_t candidates = 0, index = 0;
+    u3::SpeedState speed;
 };
 
 struct CharCtl {
@@ -60,10 +76,10 @@ struct CharCtl {
 };
 
 HINSTANCE g_inst;
-HWND g_hwnd, g_statusText, g_rescan, g_next, g_topmost, g_rawCheck, g_rawEdit, g_statusBar;
-HMENU g_actionsMenu, g_poolMenu;
+HWND g_hwnd, g_statusText, g_speedText, g_rescan, g_next, g_topmost, g_rawCheck, g_rawEdit, g_statusBar;
+HMENU g_actionsMenu, g_poolMenu, g_speedMenu;
 CharCtl g_chars[4];
-COLORREF g_statusColor = CLR_INVALID;
+COLORREF g_statusColor = CLR_INVALID, g_speedColor = CLR_INVALID;
 HFONT g_font, g_fontBold, g_fontName, g_fontMono;
 int g_dpi = 96, g_lineH = 18, g_nameH = 24;
 bool g_showRaw = false;
@@ -76,6 +92,12 @@ u3::Party g_party;  // last decoded party, for building the Pool gold menu
 
 std::atomic<bool> g_wantRescan{false}, g_wantNext{false};
 std::atomic<int> g_action{0};
+
+// Game speed as chosen in the menu (UI thread), mirrored for the worker.
+int g_step = NORMAL_STEP;
+bool g_paused = false;
+std::atomic<int> g_wantSeconds{u3::NORMAL_PASS_SECONDS};
+std::atomic<bool> g_wantPaused{false};
 HANDLE g_stopEvent, g_wakeEvent, g_thread;
 
 int S(int v) { return MulDiv(v, g_dpi, 96); }
@@ -154,6 +176,7 @@ HWND Label(const wchar_t* text, HFONT font, DWORD type = SS_LEFTNOWORDWRAP) {
 
 void CreateControls() {
     g_statusText = Label(L"Looking for DOSBox…", g_font, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
+    g_speedText = Label(L"", g_fontBold, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
     g_rescan = Child(L"BUTTON", L"&Rescan", BS_PUSHBUTTON | WS_TABSTOP, g_font, IDC_RESCAN);
     g_next = Child(L"BUTTON", L"&Next source", BS_PUSHBUTTON | WS_TABSTOP, g_font, IDC_NEXT);
     g_topmost = Child(L"BUTTON", L"Always on &top", BS_AUTOCHECKBOX | WS_TABSTOP, g_font, IDC_TOPMOST);
@@ -282,8 +305,11 @@ void Layout() {
     placeRight(g_rescan, S(80));
     MoveWindow(g_statusText, m, m + (btnH - g_lineH) / 2, std::max(0, x - m), g_lineH, FALSE);
 
+    const int speedY = m + btnH + S(4);
+    MoveWindow(g_speedText, m, speedY, W - 2 * m, g_lineH, FALSE);
+
     const int rawH = g_showRaw ? S(RAW_HEIGHT) : 0;
-    const int top = m + btnH + gap;
+    const int top = speedY + g_lineH + gap;
     const int bottom = H - m - (g_showRaw ? rawH + gap : 0);
     if (g_showRaw) MoveWindow(g_rawEdit, m, H - m - rawH, W - 2 * m, rawH, FALSE);
 
@@ -426,8 +452,38 @@ void UpdateRaw() {
     SendMessageW(g_rawEdit, EM_LINESCROLL, 0, first);
 }
 
+std::wstring DescribeSpeed(const u3::GameSpeed& speed) {
+    if (speed.paused) return L"paused — turns pass only when you act";
+    const wchar_t* pace = speed.passSeconds == u3::NORMAL_PASS_SECONDS ? L"normal"
+                          : speed.passSeconds < u3::NORMAL_PASS_SECONDS ? L"accelerated"
+                                                                        : L"slowed down";
+    return Format(L"%ls — an idle turn passes after %d s", pace, speed.passSeconds);
+}
+
+void RenderSpeed(const Snapshot& s) {
+    std::wstring text = L"Game speed: ";
+    COLORREF colour;
+    if (s.speed.sites == 0) {
+        text += DescribeSpeed(u3::GameSpeed{PASS_STEPS[g_step], g_paused}) + L"  (waiting for the game)";
+        colour = GetSysColor(COLOR_GRAYTEXT);
+    } else {
+        const u3::GameSpeed& actual = s.speed.actual;
+        text += DescribeSpeed(actual);
+        if (!s.speed.applied) text += L"  — " + s.speed.error;
+        colour = actual.paused                                     ? COL_SPEED_PAUSED
+                 : actual.passSeconds != u3::NORMAL_PASS_SECONDS ? COL_SPEED_CHANGED
+                                                                   : GetSysColor(COLOR_WINDOWTEXT);
+    }
+    SetText(g_speedText, text);
+    if (colour != g_speedColor) {
+        g_speedColor = colour;
+        InvalidateRect(g_speedText, nullptr, TRUE);
+    }
+}
+
 void Render(const Snapshot& s) {
     g_live = s.ok;
+    RenderSpeed(s);
     if (!s.ok) {
         SetStatus(s.error.empty() ? L"Waiting for a party in memory…" : s.error, COL_POISONED);
         for (int i = 0; i < 4; ++i) ShowEmpty(g_chars[i], i);
@@ -461,6 +517,8 @@ void Render(const Snapshot& s) {
 // Worker thread
 // ---------------------------------------------------------------------------
 
+u3::GameSpeed WantedSpeed() { return u3::GameSpeed{g_wantSeconds, g_wantPaused}; }
+
 DWORD WINAPI Worker(LPVOID) {
     u3::DosBoxReader reader;
     for (;;) {
@@ -481,6 +539,7 @@ DWORD WINAPI Worker(LPVOID) {
 
         auto snap = std::make_unique<Snapshot>();
         snap->ok = reader.Poll(snap->raw);
+        if (snap->ok) snap->speed = reader.SyncSpeed(WantedSpeed());
         snap->error = reader.lastError;
         snap->exe = reader.exe;
         snap->pid = reader.pid;
@@ -496,6 +555,9 @@ DWORD WINAPI Worker(LPVOID) {
         const HANDLE waits[2] = {g_stopEvent, g_wakeEvent};
         if (WaitForMultipleObjects(2, waits, FALSE, ok ? 250 : 1000) == WAIT_OBJECT_0) break;
     }
+
+    // Don't leave the game paused or slowed once nothing is showing it.
+    reader.SyncSpeed(u3::GameSpeed{}, false);
     return 0;
 }
 
@@ -506,6 +568,15 @@ DWORD WINAPI Worker(LPVOID) {
 void RequestAction(int action, const wchar_t* pending) {
     SendMessageW(g_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(pending));
     g_action = action;
+    SetEvent(g_wakeEvent);
+}
+
+// Accelerate and Slow down also resume from a pause.
+void SetSpeed(int step, bool paused) {
+    g_step = std::min(std::max(step, 0), STEP_COUNT - 1);
+    g_paused = paused;
+    g_wantSeconds = PASS_STEPS[g_step];
+    g_wantPaused = paused;
     SetEvent(g_wakeEvent);
 }
 
@@ -533,6 +604,7 @@ void RebuildPoolMenu() {
 
 bool ColourFor(HWND h, COLORREF* colour) {
     if (h == g_statusText && g_statusColor != CLR_INVALID) return *colour = g_statusColor, true;
+    if (h == g_speedText && g_speedColor != CLR_INVALID) return *colour = g_speedColor, true;
     for (const CharCtl& c : g_chars) {
         if (h == c.status) return *colour = c.statusColor, true;
         if (h == c.name && c.empty) return *colour = GetSysColor(COLOR_GRAYTEXT), true;
@@ -575,7 +647,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_GETMINMAXINFO: {
             auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
             mm->ptMinTrackSize.x = S(900);
-            mm->ptMinTrackSize.y = S(720) +(g_showRaw ? S(RAW_HEIGHT) + S(8) : 0);
+            mm->ptMinTrackSize.y = S(724) + g_lineH + (g_showRaw ? S(RAW_HEIGHT) + S(8) : 0);
             return 0;
         }
 
@@ -586,6 +658,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 case IDM_FOOD:
                     RequestAction(ACTION_FOOD, L"Distributing food…");
+                    return 0;
+                case IDM_FASTER:
+                    SetSpeed(g_step - 1, false);
+                    return 0;
+                case IDM_SLOWER:
+                    SetSpeed(g_step + 1, false);
+                    return 0;
+                case IDM_PAUSE:
+                    SetSpeed(g_step, !g_paused);
+                    return 0;
+                case IDM_NORMAL:
+                    SetSpeed(NORMAL_STEP, false);
                     return 0;
                 case IDC_RESCAN:
                     SetStatus(L"Scanning DOSBox memory…", GetSysColor(COLOR_WINDOWTEXT));
@@ -619,6 +703,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 RebuildPoolMenu();
             } else if (reinterpret_cast<HMENU>(wp) == g_poolMenu) {
                 RebuildPoolMenu();  // refresh the gold figures
+            } else if (reinterpret_cast<HMENU>(wp) == g_speedMenu) {
+                auto enable = [](int id, bool on) {
+                    EnableMenuItem(g_speedMenu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
+                };
+                enable(IDM_FASTER, g_paused || g_step > 0);
+                enable(IDM_SLOWER, g_paused || g_step < STEP_COUNT - 1);
+                enable(IDM_NORMAL, g_paused || g_step != NORMAL_STEP);
+                CheckMenuItem(g_speedMenu, IDM_PAUSE, MF_BYCOMMAND | (g_paused ? MF_CHECKED : MF_UNCHECKED));
             }
             return 0;
 
@@ -701,8 +793,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"&File");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_actionsMenu), L"&Actions");
 
+    g_speedMenu = CreatePopupMenu();
+    AppendMenuW(g_speedMenu, MF_STRING, IDM_FASTER, L"&Accelerate");
+    AppendMenuW(g_speedMenu, MF_STRING, IDM_SLOWER, L"&Slow down");
+    AppendMenuW(g_speedMenu, MF_STRING, IDM_PAUSE, L"&Pause");
+    AppendMenuW(g_speedMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_speedMenu, MF_STRING, IDM_NORMAL, L"&Normal speed");
+    AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_speedMenu), L"Game &speed");
+
     HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"Ultima III — Party Stats",
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, S(1080), S(760), nullptr,
+                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, S(1080), S(790), nullptr,
                                 menuBar, inst, nullptr);
     if (!hwnd) return 1;
     ShowWindow(hwnd, show);

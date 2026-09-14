@@ -83,6 +83,38 @@ const uint8_t* Record(const PartyBytes& raw, int member) {
     return raw.data() + HEADER_SIZE + member * RECORD_SIZE;
 }
 
+// The idle wait, identical in the overworld/town, dungeon and combat input
+// loops of EXODUS.BIN:
+//
+//       mov ah,2Ch / int 21h      ; DOS time, DH = seconds
+//       mov bl,dh / add bl,05     ; deadline = now + 5 s
+//       cmp bl,3Ch / jb +3 / sub bl,3Ch
+//   loop:
+//       call check_keystroke / jnz <read the key>
+//       mov ah,2Ch / int 21h
+//       cmp bl,dh / jnz loop      ; not there yet
+//       ...no key, so pass a turn
+//
+// The add's immediate sets the wait; turning that jnz into a jmp waits forever.
+constexpr uint8_t IDLE_SETUP[] = {0xB4, 0x2C, 0xCD, 0x21, 0x8A, 0xDE, 0x80, 0xC3, 0x05,
+                                  0x80, 0xFB, 0x3C, 0x72, 0x03, 0x80, 0xEB, 0x3C};
+constexpr size_t IDLE_SECONDS = 8;                // offset of the add's immediate
+constexpr size_t IDLE_LOOP = sizeof IDLE_SETUP;   // the loop starts right after the setup
+constexpr size_t IDLE_WINDOW = IDLE_LOOP + 0x40;  // its closing jump lies within this
+constexpr uint8_t OP_JNZ = 0x75, OP_JMP = 0xEB;
+
+// If p (IDLE_WINDOW bytes) is an idle wait, the offset of its jnz/jmp opcode; else 0.
+size_t MatchIdleLoop(const uint8_t* p) {
+    for (size_t i = 0; i < IDLE_LOOP; ++i)
+        if (i != IDLE_SECONDS && p[i] != IDLE_SETUP[i]) return 0;
+    for (size_t j = IDLE_LOOP; j + 4 <= IDLE_WINDOW; ++j) {
+        if (p[j] != 0x3A || p[j + 1] != 0xDE || (p[j + 2] != OP_JNZ && p[j + 2] != OP_JMP)) continue;
+        const ptrdiff_t target = static_cast<ptrdiff_t>(j + 4) + static_cast<int8_t>(p[j + 3]);
+        if (target == static_cast<ptrdiff_t>(IDLE_LOOP)) return j + 2;
+    }
+    return 0;
+}
+
 bool LooksLikeRecord(const uint8_t* r) {
     return r[O_INUSE] == 0xFF && Find(STATUSES, r[O_STATUS]) && Find(RACES, r[O_RACE]) &&
            Find(CLASSES, r[O_CLASS]) && Find(SEXES, r[O_SEX]);
@@ -160,6 +192,39 @@ std::vector<std::pair<DWORD, std::wstring>> FindDosBox() {
     return found;
 }
 
+// Hands visit(address, bytes, count, regionSize) every committed, readable
+// region big enough to matter, in chunks that overlap so a pattern straddling
+// a chunk edge is still seen whole.
+template <typename Visit>
+void ForEachChunk(HANDLE process, Visit visit) {
+    constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    constexpr size_t CHUNK = 4 << 20;
+    constexpr size_t OVERLAP = PARTY_SIZE + RECORD_SIZE * 4;
+
+    std::vector<uint8_t> buf(CHUNK);
+    MEMORY_BASIC_INFORMATION mbi;
+    uint64_t addr = 0;
+
+    while (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof mbi)) {
+        uint64_t base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
+        uint64_t size = mbi.RegionSize;
+        if (size == 0) break;
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & READABLE) && !(mbi.Protect & PAGE_GUARD) &&
+            size >= 0x10000 && size <= (1ull << 30)) {
+            for (uint64_t pos = 0; pos < size; pos += CHUNK - OVERLAP) {
+                size_t n = static_cast<size_t>(std::min<uint64_t>(CHUNK, size - pos));
+                SIZE_T got = 0;
+                if (ReadProcessMemory(process, reinterpret_cast<LPCVOID>(base + pos), buf.data(), n, &got) &&
+                    got == n)
+                    visit(base + pos, buf.data(), n, size);
+                if (n < CHUNK) break;
+            }
+        }
+        addr = base + size;
+    }
+}
+
 }  // namespace
 
 bool LooksLikeParty(const uint8_t* raw) {
@@ -193,6 +258,8 @@ void DosBoxReader::Close() {
     pid = 0;
     canWrite = false;
     exe.clear();
+    idleLoops_.clear();
+    lastIdleScan_ = 0;
     candidates.clear();
     index = 0;
 }
@@ -245,46 +312,24 @@ void DosBoxReader::Scan() {
     index = 0;
     if (!handle_) return;
 
-    constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
-                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    constexpr size_t CHUNK = 4 << 20;
-    constexpr size_t OVERLAP = PARTY_SIZE + RECORD_SIZE * 4;
-
     std::map<uint64_t, uint64_t> found;  // party address -> size of the region holding it
-    std::vector<uint8_t> buf(CHUNK);
     PartyBytes block;
-    MEMORY_BASIC_INFORMATION mbi;
-    uint64_t addr = 0;
-
-    while (VirtualQueryEx(handle_, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof mbi)) {
-        uint64_t base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
-        uint64_t size = mbi.RegionSize;
-        if (size == 0) break;
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & READABLE) && !(mbi.Protect & PAGE_GUARD) &&
-            size >= 0x10000 && size <= (1ull << 30)) {
-            for (uint64_t pos = 0; pos < size; pos += CHUNK - OVERLAP) {
-                size_t n = static_cast<size_t>(std::min<uint64_t>(CHUNK, size - pos));
-                if (Read(base + pos, buf.data(), n)) {
-                    for (size_t i = 0; i + 0x19 <= n; ++i) {
-                        if (buf[i + O_INUSE] != 0xFF || !MatchesSignature(&buf[i])) continue;
-                        uint64_t record = base + pos + i;
-                        // The match may be any of the four records.
-                        for (size_t k = 0; k < 4; ++k) {
-                            uint64_t back = HEADER_SIZE + k * RECORD_SIZE;
-                            if (record < back) break;
-                            uint64_t party = record - back;
-                            if (Read(party, block.data(), PARTY_SIZE) && LooksLikeParty(block.data())) {
-                                found[party] = std::max(found[party], size);
-                                break;
-                            }
-                        }
-                    }
+    ForEachChunk(handle_, [&](uint64_t at, const uint8_t* buf, size_t n, uint64_t regionSize) {
+        for (size_t i = 0; i + 0x19 <= n; ++i) {
+            if (buf[i + O_INUSE] != 0xFF || !MatchesSignature(&buf[i])) continue;
+            uint64_t record = at + i;
+            // The match may be any of the four records.
+            for (size_t k = 0; k < 4; ++k) {
+                uint64_t back = HEADER_SIZE + k * RECORD_SIZE;
+                if (record < back) break;
+                uint64_t party = record - back;
+                if (Read(party, block.data(), PARTY_SIZE) && LooksLikeParty(block.data())) {
+                    found[party] = std::max(found[party], regionSize);
+                    break;
                 }
-                if (n < CHUNK) break;
             }
         }
-        addr = base + size;
-    }
+    });
 
     // Prefer the biggest region: DOSBox's emulated RAM is one large
     // allocation, while stray copies sit in small heap blocks.
@@ -334,12 +379,15 @@ bool DosBoxReader::BeginAction(PartyBytes& raw, ActionResult& result) const {
     return true;
 }
 
+bool DosBoxReader::Write(uint64_t address, const uint8_t* bytes, size_t size) {
+    SIZE_T written = 0;
+    return canWrite && WriteProcessMemory(handle_, reinterpret_cast<LPVOID>(address), bytes, size, &written) &&
+           written == size;
+}
+
 bool DosBoxReader::WriteBcd2(int member, size_t offset, int value) {
     const uint8_t bytes[2] = {ToBcd(value % 100), ToBcd(value / 100 % 100)};
-    const uint64_t at = candidates[index] + HEADER_SIZE + member * RECORD_SIZE + offset;
-    SIZE_T written = 0;
-    return WriteProcessMemory(handle_, reinterpret_cast<LPVOID>(at), bytes, sizeof bytes, &written) &&
-           written == sizeof bytes;
+    return Write(candidates[index] + HEADER_SIZE + member * RECORD_SIZE + offset, bytes, sizeof bytes);
 }
 
 ActionResult DosBoxReader::DistributeFood() {
@@ -429,6 +477,72 @@ ActionResult DosBoxReader::PoolGold(int target) {
         result.message += L" " + std::to_wstring(leftOver) + L" stayed with the others — " +
                           std::to_wstring(MAX_BCD2) + L" is the most one character can carry.";
     return result;
+}
+
+void DosBoxReader::ScanIdleLoops() {
+    idleLoops_.clear();
+    if (!handle_) return;
+
+    // Like the party, the live code sits in DOSBox's big emulated-RAM
+    // allocation; keep only loops from the largest region to skip stray
+    // copies of EXODUS.BIN in file buffers.
+    std::map<uint64_t, std::pair<uint64_t, IdleLoop>> found;  // address -> (region size, loop)
+    ForEachChunk(handle_, [&](uint64_t at, const uint8_t* buf, size_t n, uint64_t regionSize) {
+        for (size_t i = 0; i + IDLE_WINDOW <= n; ++i) {
+            if (buf[i] != IDLE_SETUP[0] || buf[i + 1] != IDLE_SETUP[1]) continue;
+            if (size_t jumpAt = MatchIdleLoop(&buf[i])) found[at + i] = {regionSize, IdleLoop{at + i, jumpAt}};
+        }
+    });
+
+    uint64_t biggest = 0;
+    for (const auto& f : found) biggest = std::max(biggest, f.second.first);
+    for (const auto& f : found)
+        if (f.second.first == biggest) idleLoops_.push_back(f.second.second);
+}
+
+SpeedState DosBoxReader::SyncSpeed(const GameSpeed& want, bool allowScan) {
+    SpeedState state;
+    if (!handle_) return state;
+
+    // The game reloads EXODUS.BIN on Alt-R, a new journey and so on, so make
+    // sure the loops are still where we found them.
+    uint8_t window[IDLE_WINDOW];
+    for (const IdleLoop& loop : idleLoops_) {
+        if (!Read(loop.address, window, IDLE_WINDOW) || MatchIdleLoop(window) != loop.jumpAt) {
+            idleLoops_.clear();
+            lastIdleScan_ = 0;  // they moved: look again straight away
+            break;
+        }
+    }
+    if (idleLoops_.empty()) {
+        const ULONGLONG now = GetTickCount64();
+        if (!allowScan || now - lastIdleScan_ < 3000) return state;
+        lastIdleScan_ = now;
+        ScanIdleLoops();
+        if (idleLoops_.empty()) return state;
+    }
+
+    const uint8_t seconds = static_cast<uint8_t>(std::min(std::max(want.passSeconds, 1), MAX_PASS_SECONDS));
+    const uint8_t jump = want.paused ? OP_JMP : OP_JNZ;
+    state.sites = idleLoops_.size();
+    state.applied = true;
+    for (const IdleLoop& loop : idleLoops_) {
+        const bool ok = Read(loop.address, window, IDLE_WINDOW) &&
+                        (window[IDLE_SECONDS] == seconds || Write(loop.address + IDLE_SECONDS, &seconds, 1)) &&
+                        (window[loop.jumpAt] == jump || Write(loop.address + loop.jumpAt, &jump, 1));
+        if (!ok) state.applied = false;
+    }
+
+    // Report what the game is really running with now.
+    const IdleLoop& first = idleLoops_.front();
+    if (Read(first.address, window, IDLE_WINDOW)) {
+        state.actual.passSeconds = window[IDLE_SECONDS];
+        state.actual.paused = window[first.jumpAt] == OP_JMP;
+    }
+    if (!state.applied)
+        state.error = canWrite ? L"writing to DOSBox failed"
+                               : L"DOSBox is read-only — run U3Stats as administrator to change it";
+    return state;
 }
 
 }  // namespace u3

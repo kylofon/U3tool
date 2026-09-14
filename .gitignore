@@ -1,7 +1,3 @@
 # Build output
 *.exe
 *.o
-
-# Python
-__pycache__/
-*.pyc
