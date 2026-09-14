@@ -4,6 +4,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
 #include <map>
 
@@ -33,17 +34,19 @@ const Code SEXES[] = {{'M', L"Male"}, {'F', L"Female"}, {'O', L"Other"}};
 const Code STATUSES[] = {{'G', L"Good"}, {'P', L"Poisoned"}, {'D', L"Dead"}, {'A', L"Ashes"}};
 
 // Character record field offsets.
-constexpr size_t O_NAME = 0x00, NAME_LEN = 16;
+constexpr size_t O_NAME = 0x00, NAME_LEN = 15;
+constexpr size_t O_TORCHES = 0x0F;  // Ignite takes one from here
 constexpr size_t O_INUSE = 0x10, O_STATUS = 0x11;
 constexpr size_t O_STR = 0x12, O_DEX = 0x13, O_INT = 0x14, O_WIS = 0x15;
 constexpr size_t O_RACE = 0x16, O_CLASS = 0x17, O_SEX = 0x18;
 constexpr size_t O_MP = 0x19, O_HP = 0x1A, O_MAXHP = 0x1C, O_EXP = 0x1E;
-constexpr size_t O_TORCHES = 0x20, O_FOOD = 0x21, O_GOLD = 0x23;
+constexpr size_t O_FOOD = 0x21, O_GOLD = 0x23;  // 0x20 holds food hundredths, used up as you travel
 constexpr size_t O_GEMS = 0x25, O_KEYS = 0x26, O_POWDERS = 0x27;
 constexpr size_t O_ARMOUR_WORN = 0x28, O_ARMOUR_INV = 0x29;    // worn index, then armour 1..7
 constexpr size_t O_WEAPON_READY = 0x30, O_WEAPON_INV = 0x31;   // readied index, then weapons 1..15
 
 // Party header offsets.
+constexpr size_t H_MAP = 0x02;
 constexpr size_t H_COUNT = 0x07;
 constexpr size_t H_SLOTS = 0x0A;
 
@@ -78,6 +81,7 @@ uint8_t ToBcd(int v) { return static_cast<uint8_t>(((v / 10) << 4) | (v % 10)); 
 
 // Two BCD bytes hold four digits, so no character can carry more than this.
 constexpr int MAX_BCD2 = 9999;
+constexpr int MAX_BCD1 = 99;  // likewise one byte, e.g. of any one item
 
 const uint8_t* Record(const PartyBytes& raw, int member) {
     return raw.data() + HEADER_SIZE + member * RECORD_SIZE;
@@ -142,6 +146,7 @@ Character DecodeCharacter(const uint8_t* r) {
     c.present = !c.name.empty() || r[O_INUSE] == 0xFF;
 
     c.statusCode = static_cast<char>(r[O_STATUS]);
+    c.classCode = static_cast<char>(r[O_CLASS]);
     c.status = NameOr(Find(STATUSES, r[O_STATUS]), r[O_STATUS]);
     c.race = NameOr(Find(RACES, r[O_RACE]), r[O_RACE]);
     c.klass = NameOr(Find(CLASSES, r[O_CLASS]), r[O_CLASS]);
@@ -166,16 +171,31 @@ Character DecodeCharacter(const uint8_t* r) {
     c.weapon = w < 16 ? std::wstring(WEAPONS[w]) : Unknown(w);
     c.armour = a < 8 ? std::wstring(ARMOUR[a]) : Unknown(a);
 
-    for (size_t i = 1; i < 16; ++i) {
-        int n = Bcd1(r[O_WEAPON_INV + i - 1]);
-        if (n > 0) c.carried.emplace_back(WEAPONS[i], n);
-    }
-    for (size_t i = 1; i < 8; ++i) {
-        int n = Bcd1(r[O_ARMOUR_INV + i - 1]);
-        if (n > 0) c.carried.emplace_back(ARMOUR[i], n);
-    }
+    // The item in use gets a line of its own, apart from any spares of its type.
+    auto carry = [&c](const wchar_t* name, int n, bool armour, size_t type, bool equipped) {
+        if (n <= 0) return;
+        if (equipped) {
+            c.carried.push_back({name, 1, armour, static_cast<int>(type), true});
+            if (--n == 0) return;
+        }
+        c.carried.push_back({name, n, armour, static_cast<int>(type), false});
+    };
+    for (size_t i = 1; i < 16; ++i) carry(WEAPONS[i], Bcd1(r[O_WEAPON_INV + i - 1]), false, i, w == i);
+    for (size_t i = 1; i < 8; ++i) carry(ARMOUR[i], Bcd1(r[O_ARMOUR_INV + i - 1]), true, i, a == i);
     return c;
 }
+
+bool ValidItem(bool armour, int type) { return type >= 1 && type < (armour ? 8 : 16); }
+const wchar_t* ItemName(bool armour, int type) { return armour ? ARMOUR[type] : WEAPONS[type]; }
+size_t InventoryOffset(bool armour, int type) { return (armour ? O_ARMOUR_INV : O_WEAPON_INV) + type - 1; }
+
+// Class limits used by EXODUS.BIN's Ready and Wear commands: the class letters
+// (at 7A05) and, for each, the letter of the first weapon and armour it may
+// not use (79EF, 79FA), counting 'A' as Hand/Skin. Exotic items are exempt.
+constexpr char EQUIP_CLASSES[] = "FCWTPBLIDAR";
+constexpr char WEAPON_LIMITS[] = "QDCHQQQDDCL";
+constexpr char ARMOUR_LIMITS[] = "IECDFDCDCCH";
+constexpr int EXOTIC_WEAPON = 15, EXOTIC_ARMOUR = 7;
 
 std::vector<std::pair<DWORD, std::wstring>> FindDosBox() {
     std::vector<std::pair<DWORD, std::wstring>> found;
@@ -243,11 +263,65 @@ bool LooksLikeParty(const uint8_t* raw) {
 Party DecodeParty(const uint8_t* raw) {
     Party p;
     p.count = raw[H_COUNT];
+    p.map = raw[H_MAP];
     for (int i = 0; i < 4; ++i) {
         p.slots[i] = raw[H_SLOTS + i];
         p.chars[i] = DecodeCharacter(raw + HEADER_SIZE + i * RECORD_SIZE);
     }
     return p;
+}
+
+int MovableItems(const uint8_t* raw, const ItemMove& move, std::wstring* why) {
+    auto none = [why](std::wstring reason) {
+        if (why) *why = std::move(reason);
+        return 0;
+    };
+    const int count = raw[H_COUNT];
+    if (move.from < 0 || move.from >= count || move.to < 0 || move.to >= count || move.from == move.to)
+        return none(L"Those two aren't both in the party any more.");
+    if (!ValidItem(move.armour, move.type)) return none(L"That isn't an item Ultima III knows.");
+
+    const uint8_t* giver = raw + HEADER_SIZE + move.from * RECORD_SIZE;
+    const uint8_t* taker = raw + HEADER_SIZE + move.to * RECORD_SIZE;
+    const std::wstring item = ItemName(move.armour, move.type);
+    const size_t at = InventoryOffset(move.armour, move.type);
+    const int have = Bcd1(giver[at]), held = Bcd1(taker[at]);
+    if (have < 0 || held < 0) return none(L"An item count isn't valid BCD — nothing was changed.");
+    if (have == 0) return none(DecodeCharacter(giver).name + L" has no " + item + L" any more.");
+
+    const bool equipped = giver[move.armour ? O_ARMOUR_WORN : O_WEAPON_READY] == move.type;
+    const int spare = have - (equipped ? 1 : 0);
+    if (spare <= 0)
+        return none(DecodeCharacter(giver).name +
+                    (move.armour ? L" is wearing their only " + item + L" — take it off in game first."
+                                 : L" has their only " + item + L" readied — ready something else in game first."));
+    const int room = MAX_BCD1 - held;
+    if (room <= 0)
+        return none(DecodeCharacter(taker).name + L" already carries " + std::to_wstring(MAX_BCD1) + L" " + item +
+                    L", the most one character can hold.");
+    return std::min(spare, room);
+}
+
+std::wstring EquipProblem(const uint8_t* raw, const Equip& equip) {
+    if (equip.member < 0 || equip.member >= raw[H_COUNT]) return L"That party member isn't in the party any more.";
+    const uint8_t* r = raw + HEADER_SIZE + equip.member * RECORD_SIZE;
+    const Character ch = DecodeCharacter(r);
+    if (r[O_STATUS] == 'D' || r[O_STATUS] == 'A') return ch.name + L" is " + ch.status + L" and can't change equipment.";
+    if (equip.type == 0) return L"";
+    if (!ValidItem(equip.armour, equip.type)) return L"That isn't an item Ultima III knows.";
+
+    const std::wstring item = ItemName(equip.armour, equip.type);
+    if (Bcd1(r[InventoryOffset(equip.armour, equip.type)]) <= 0) return ch.name + L" has no " + item + L".";
+    if (equip.type == (equip.armour ? EXOTIC_ARMOUR : EXOTIC_WEAPON)) return L"";
+
+    int limit = 0;  // an unknown class may use nothing
+    for (int i = 0; EQUIP_CLASSES[i]; ++i)
+        if (static_cast<uint8_t>(EQUIP_CLASSES[i]) == r[O_CLASS])
+            limit = (equip.armour ? ARMOUR_LIMITS : WEAPON_LIMITS)[i] - 'A';
+    if (equip.type >= limit)
+        return L"Not allowed: " + ch.name + L" (" + ch.klass + L") can't " + (equip.armour ? L"wear " : L"ready ") +
+               item + L".";
+    return L"";
 }
 
 DosBoxReader::~DosBoxReader() { Close(); }
@@ -339,6 +413,16 @@ void DosBoxReader::Scan() {
     for (const auto& r : ranked) candidates.push_back(r.first);
 }
 
+int DosBoxReader::CombatTurn() const {
+    // EXODUS.BIN keeps the party block at 14BA in its segment and the combat
+    // turn at 84E1, so the turn sits a fixed distance past the party.
+    constexpr uint64_t PARTY_AT = 0x14BA, TURN_AT = 0x84E1;
+    uint8_t turn = 0xFF;
+    if (index >= candidates.size() || !Read(candidates[index] + (TURN_AT - PARTY_AT), &turn, 1) || turn > 3)
+        return -1;
+    return turn;
+}
+
 void DosBoxReader::NextCandidate() {
     if (!candidates.empty()) index = (index + 1) % candidates.size();
 }
@@ -373,7 +457,7 @@ bool DosBoxReader::BeginAction(PartyBytes& raw, ActionResult& result) const {
         return false;
     }
     if (!canWrite) {
-        result.message = L"DOSBox could only be opened read-only — run U3Stats as administrator to change values.";
+        result.message = L"DOSBox could only be opened read-only — run Ultima III Assistant as administrator to change values.";
         return false;
     }
     return true;
@@ -479,6 +563,191 @@ ActionResult DosBoxReader::PoolGold(int target) {
     return result;
 }
 
+ActionResult DosBoxReader::Revive(int member) {
+    ActionResult result;
+    PartyBytes raw;
+    if (!BeginAction(raw, result)) return result;
+    if (member < 0 || member >= raw[H_COUNT]) {
+        result.message = L"That party member is no longer in the party.";
+        return result;
+    }
+
+    const uint8_t* r = Record(raw, member);
+    const std::wstring name = DecodeCharacter(r).name;
+    if (r[O_STATUS] != 'D' && r[O_STATUS] != 'A') {
+        result.message = name + L" isn't dead.";
+        return result;
+    }
+    const int maxHp = Bcd2(r, O_MAXHP);
+    if (maxHp <= 0) {
+        result.message = name + L"'s maximum hit points aren't valid BCD — nothing was changed.";
+        return result;
+    }
+
+    // Hit points first, so nobody is ever alive with none.
+    const uint8_t good = 'G';
+    if (!WriteBcd2(member, O_HP, maxHp) ||
+        !Write(candidates[index] + HEADER_SIZE + member * RECORD_SIZE + O_STATUS, &good, 1)) {
+        result.message = L"Writing to DOSBox failed — check " + name + L" in game.";
+        return result;
+    }
+    result.ok = true;
+    result.message = name + L" is alive again, with full health.";
+    return result;
+}
+
+ActionResult DosBoxReader::FullHealth(int member) {
+    ActionResult result;
+    PartyBytes raw;
+    if (!BeginAction(raw, result)) return result;
+    if (member < 0 || member >= raw[H_COUNT]) {
+        result.message = L"That party member is no longer in the party.";
+        return result;
+    }
+
+    const uint8_t* r = Record(raw, member);
+    const std::wstring name = DecodeCharacter(r).name;
+    if (r[O_STATUS] == 'D' || r[O_STATUS] == 'A') {
+        result.message = name + L" is dead — revive them first.";
+        return result;
+    }
+    const int hp = Bcd2(r, O_HP), maxHp = Bcd2(r, O_MAXHP);
+    if (hp < 0 || maxHp <= 0) {
+        result.message = name + L"'s hit points aren't valid BCD — nothing was changed.";
+        return result;
+    }
+
+    result.ok = true;
+    if (hp >= maxHp) {
+        result.message = name + L" already has full health.";
+    } else if (WriteBcd2(member, O_HP, maxHp)) {
+        result.message = name + L" is back to full health (" + std::to_wstring(maxHp) + L" HP).";
+    } else {
+        result.ok = false;
+        result.message = L"Writing to DOSBox failed — nothing was changed.";
+    }
+    return result;
+}
+
+ActionResult DosBoxReader::Cure(int member) {
+    ActionResult result;
+    PartyBytes raw;
+    if (!BeginAction(raw, result)) return result;
+    if (member < 0 || member >= raw[H_COUNT]) {
+        result.message = L"That party member is no longer in the party.";
+        return result;
+    }
+
+    const uint8_t* r = Record(raw, member);
+    const std::wstring name = DecodeCharacter(r).name;
+    if (r[O_STATUS] != 'P') {
+        result.message = name + L" isn't poisoned.";
+        return result;
+    }
+    const uint8_t good = 'G';
+    if (!Write(candidates[index] + HEADER_SIZE + member * RECORD_SIZE + O_STATUS, &good, 1)) {
+        result.message = L"Writing to DOSBox failed — nothing was changed.";
+        return result;
+    }
+    result.ok = true;
+    result.message = name + L" is cured of poison.";
+    return result;
+}
+
+ActionResult DosBoxReader::MoveItems(const ItemMove& move) {
+    ActionResult result;
+    PartyBytes raw;
+    if (!BeginAction(raw, result)) return result;
+
+    const int movable = MovableItems(raw.data(), move, &result.message);
+    if (movable == 0) return result;
+    if (move.count < 1 || move.count > movable) {
+        result.message = L"The inventories changed in the meantime — nothing was moved.";
+        return result;
+    }
+
+    const size_t at = InventoryOffset(move.armour, move.type);
+    const uint8_t given = ToBcd(Bcd1(Record(raw, move.to)[at]) + move.count);
+    const uint8_t kept = ToBcd(Bcd1(Record(raw, move.from)[at]) - move.count);
+    const uint64_t party = candidates[index];
+
+    // Credit the recipient first: if the second write fails, items are
+    // duplicated rather than lost.
+    if (!Write(party + HEADER_SIZE + move.to * RECORD_SIZE + at, &given, 1)) {
+        result.message = L"Writing to DOSBox failed — nothing was changed.";
+        return result;
+    }
+    if (!Write(party + HEADER_SIZE + move.from * RECORD_SIZE + at, &kept, 1)) {
+        result.message = L"Writing to DOSBox failed part-way — check the inventories in game.";
+        return result;
+    }
+
+    result.ok = true;
+    result.message = L"Moved " + std::to_wstring(move.count) + L" × " + ItemName(move.armour, move.type) +
+                     L" from " + DecodeCharacter(Record(raw, move.from)).name + L" to " +
+                     DecodeCharacter(Record(raw, move.to)).name + L".";
+    return result;
+}
+
+std::vector<Equip> EquipmentLostToSale(const uint8_t* before, const uint8_t* after) {
+    std::vector<Equip> lost;
+    const int count = after[H_COUNT];
+    if (before[H_COUNT] != count || std::memcmp(before + H_SLOTS, after + H_SLOTS, 4) != 0) return lost;
+
+    for (int member = 0; member < count; ++member) {
+        const uint8_t* was = before + HEADER_SIZE + member * RECORD_SIZE;
+        const uint8_t* now = after + HEADER_SIZE + member * RECORD_SIZE;
+        if (std::memcmp(was, now, NAME_LEN) != 0) continue;
+        const int goldBefore = Bcd2(was, O_GOLD), goldAfter = Bcd2(now, O_GOLD);
+        if (goldBefore < 0 || goldAfter <= goldBefore) continue;  // a sale pays
+
+        for (bool armour : {false, true}) {
+            const size_t field = armour ? O_ARMOUR_WORN : O_WEAPON_READY;
+            const int type = was[field];
+            if (type == 0 || now[field] != 0 || !ValidItem(armour, type)) continue;
+
+            // Something of this kind must have gone, and some of the equipped
+            // item must be left; selling the last one leaves it unequipped.
+            const int kinds = armour ? 7 : 15;
+            const size_t inventory = armour ? O_ARMOUR_INV : O_WEAPON_INV;
+            int carriedBefore = 0, carriedAfter = 0;
+            for (int i = 0; i < kinds; ++i) {
+                carriedBefore += std::max(Bcd1(was[inventory + i]), 0);
+                carriedAfter += std::max(Bcd1(now[inventory + i]), 0);
+            }
+            if (carriedAfter < carriedBefore && Bcd1(now[InventoryOffset(armour, type)]) > 0)
+                lost.push_back({member, armour, type});
+        }
+    }
+    return lost;
+}
+
+ActionResult DosBoxReader::SetEquipped(const Equip& equip) {
+    ActionResult result;
+    PartyBytes raw;
+    if (!BeginAction(raw, result)) return result;
+
+    result.message = EquipProblem(raw.data(), equip);
+    if (!result.message.empty()) return result;
+
+    // Like the game, store the type index; the item stays in the inventory count.
+    const uint8_t type = static_cast<uint8_t>(equip.type);
+    const size_t field = equip.armour ? O_ARMOUR_WORN : O_WEAPON_READY;
+    if (!Write(candidates[index] + HEADER_SIZE + equip.member * RECORD_SIZE + field, &type, 1)) {
+        result.message = L"Writing to DOSBox failed — nothing was changed.";
+        return result;
+    }
+
+    const std::wstring name = DecodeCharacter(Record(raw, equip.member)).name;
+    result.ok = true;
+    if (equip.type == 0)
+        result.message = name + (equip.armour ? L" took their armour off." : L" put their weapon away.");
+    else
+        result.message = name + (equip.armour ? L" is now wearing " : L" readied ") + ItemName(equip.armour, equip.type) +
+                         L".";
+    return result;
+}
+
 void DosBoxReader::ScanIdleLoops() {
     idleLoops_.clear();
     if (!handle_) return;
@@ -541,7 +810,7 @@ SpeedState DosBoxReader::SyncSpeed(const GameSpeed& want, bool allowScan) {
     }
     if (!state.applied)
         state.error = canWrite ? L"writing to DOSBox failed"
-                               : L"DOSBox is read-only — run U3Stats as administrator to change it";
+                               : L"DOSBox is read-only — run Ultima III Assistant as administrator to change it";
     return state;
 }
 

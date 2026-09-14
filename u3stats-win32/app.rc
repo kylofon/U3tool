@@ -13,8 +13,8 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "FileDescription", "Ultima III live party stats"
-      VALUE "ProductName", "U3Stats"
+      VALUE "FileDescription", "Ultima III Assistant"
+      VALUE "ProductName", "Ultima III Assistant"
       VALUE "FileVersion", "1.0.0.0"
     END
   END

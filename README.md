@@ -3,7 +3,7 @@
 Live party stats and inventory for **Ultima III: Exodus** (the GOG DOS release
 running under DOSBox), read straight out of the emulator's memory while you play.
 
-The tool is a native Win32 app in [`u3stats-win32/`](u3stats-win32/), with menus
+**Ultima III Assistant** is a native Win32 app in [`u3stats-win32/`](u3stats-win32/), with menus
 for editing food and gold and for slowing or pausing the idle turn timer. Build
 it with `build.cmd`, then run `U3Stats.exe`.
 

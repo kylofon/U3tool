@@ -1,4 +1,4 @@
-// main.cpp -- U3Stats: a native Win32 live party viewer for Ultima III.
+// main.cpp -- Ultima III Assistant: a native Win32 live party viewer and editor.
 //
 // A worker thread polls DOSBox through u3::DosBoxReader and posts snapshots
 // to the window; the UI thread decodes them and updates standard controls,
@@ -14,13 +14,18 @@
 #include <vector>
 
 #include "reader.h"
+#include "reference.h"
+#include "settings.h"
 
 namespace {
 
 constexpr UINT WM_APP_SNAPSHOT = WM_APP + 1;
 constexpr UINT WM_APP_ACTION = WM_APP + 2;
+constexpr UINT WM_APP_DROP = WM_APP + 3;
 
-enum : int { IDC_RESCAN = 100, IDC_NEXT, IDC_TOPMOST, IDC_RAW, IDC_RAWEDIT };
+const wchar_t* const APP_TITLE = L"Ultima III Assistant";
+
+enum : int { IDC_RAWEDIT = 100, IDC_MINUS, IDC_PLUS, IDC_COUNT, IDC_TOPMOST };
 enum : int {
     IDM_QUIT = 200,
     IDM_FOOD,
@@ -28,16 +33,57 @@ enum : int {
     IDM_SLOWER,
     IDM_PAUSE,
     IDM_NORMAL,
+    IDM_PREFERENCES,
+    IDM_RESCAN,
+    IDM_NEXT,
+    IDM_RAW,
     IDM_POOL_BASE = 210,  // IDM_POOL_BASE + party member
+    IDM_EQUIP = 220,
+    IDM_DEBUG_INFO,
+    IDM_REFERENCE_BASE = 230,  // IDM_REFERENCE_BASE + u3ref::Kind
+    IDM_REVIVE_BASE = 240,     // IDM_REVIVE_BASE + party member
+    IDM_HEAL_BASE = 250,       // IDM_HEAL_BASE + party member
+    IDM_CURE_BASE = 260,       // IDM_CURE_BASE + party member
 };
 
-// Requests handed to the worker thread; pooling adds the member index.
+// Requests handed to the worker thread; pooling, reviving, healing and curing
+// add the member index, and an item move or equipment change packs its details
+// into the low bits.
 constexpr int ACTION_FOOD = 1;
 constexpr int ACTION_POOL = 10;
+constexpr int ACTION_REVIVE = 20;
+constexpr int ACTION_HEAL = 30;
+constexpr int ACTION_CURE = 40;
+constexpr int ACTION_MOVE = 1 << 16;
+constexpr int ACTION_EQUIP = 1 << 17;
 
-enum Row { ROW_HP, ROW_MP, ROW_EXP, ROW_FOOD, ROW_GOLD, ROW_WEAPON, ROW_ARMOUR, ROW_COUNT };
-const wchar_t* const ROW_LABELS[ROW_COUNT] = {L"Hit points", L"Magic points", L"Experience", L"Food",
-                                              L"Gold",       L"Weapon",       L"Armour"};
+int PackMove(const u3::ItemMove& m) {
+    return ACTION_MOVE | m.from << 14 | m.to << 12 | (m.armour ? 1 : 0) << 11 | m.type << 7 | m.count;
+}
+
+u3::ItemMove UnpackMove(int action) {
+    u3::ItemMove m;
+    m.from = action >> 14 & 3;
+    m.to = action >> 12 & 3;
+    m.armour = (action >> 11 & 1) != 0;
+    m.type = action >> 7 & 15;
+    m.count = action & 127;
+    return m;
+}
+
+int PackEquip(const u3::Equip& e) { return ACTION_EQUIP | e.member << 5 | (e.armour ? 1 : 0) << 4 | e.type; }
+
+u3::Equip UnpackEquip(int action) {
+    u3::Equip e;
+    e.member = action >> 5 & 3;
+    e.armour = (action >> 4 & 1) != 0;
+    e.type = action & 15;
+    return e;
+}
+
+// Equipment has no row: the Carrying list marks what's readied and worn.
+enum Row { ROW_HP, ROW_MP, ROW_EXP, ROW_FOOD, ROW_GOLD, ROW_COUNT };
+const wchar_t* const ROW_LABELS[ROW_COUNT] = {L"Hit points", L"Magic points", L"Experience", L"Food", L"Gold"};
 const wchar_t* const STAT_LABELS[4] = {L"Strength", L"Dexterity", L"Intelligence", L"Wisdom"};
 const wchar_t* const COUNTER_LABELS[4] = {L"Gems", L"Keys", L"Powders", L"Torches"};
 
@@ -45,8 +91,6 @@ const COLORREF COL_GOOD = RGB(0, 128, 0);
 const COLORREF COL_POISONED = RGB(170, 110, 0);
 const COLORREF COL_DEAD = RGB(192, 0, 0);
 const COLORREF COL_ASHES = RGB(110, 110, 110);
-const COLORREF COL_SPEED_CHANGED = RGB(170, 110, 0);
-const COLORREF COL_SPEED_PAUSED = RGB(0, 90, 180);
 
 // Idle waits offered by the Game speed menu, fastest first.
 const int PASS_STEPS[] = {1, 2, 3, u3::NORMAL_PASS_SECONDS, 10, 15, 30, u3::MAX_PASS_SECONDS};
@@ -61,6 +105,7 @@ struct Snapshot {
     uint64_t address = 0;
     size_t candidates = 0, index = 0;
     u3::SpeedState speed;
+    int combatTurn = -1;
 };
 
 struct CharCtl {
@@ -68,27 +113,42 @@ struct CharCtl {
     HWND rowLbl[ROW_COUNT], rowVal[ROW_COUNT];
     HWND statLbl[4], statVal[4];
     HWND cntLbl[4], cntVal[4];
-    HWND sep[4];
+    HWND sep[3];
     COLORREF statusColor = COL_GOOD;
     bool empty = true;
     int barMax = -1, barPos = -1, barState = -1;
     std::vector<std::wstring> carried;
+    std::vector<u3::CarriedItem> items;  // what each line of carryList holds
 };
 
 HINSTANCE g_inst;
-HWND g_hwnd, g_statusText, g_speedText, g_rescan, g_next, g_topmost, g_rawCheck, g_rawEdit, g_statusBar;
-HMENU g_actionsMenu, g_poolMenu, g_speedMenu;
+HWND g_hwnd, g_rawEdit, g_statusBar;
+HMENU g_actionsMenu, g_poolMenu, g_speedMenu, g_debugMenu, g_cheatMenu, g_reviveMenu, g_healMenu, g_cureMenu;
 CharCtl g_chars[4];
-COLORREF g_statusColor = CLR_INVALID, g_speedColor = CLR_INVALID;
 HFONT g_font, g_fontBold, g_fontName, g_fontMono;
 int g_dpi = 96, g_lineH = 18, g_nameH = 24;
+int g_columnH = 0;  // height of a party member's box, set by Layout
 bool g_showRaw = false;
+bool g_topmost = true;
+
+// Status bar: the latest message on the left, game speed on the right.
+std::wstring g_statusParts[2] = {L"Ready.", L""};
+std::wstring g_problem;  // why we're not connected, as last shown
+
+// Connection details for the Debug menu.
+std::wstring g_debugInfo = L"Not connected";
+size_t g_sourceCount = 0, g_sourceIndex = 0;  // copies of the party block found, and the one shown
 bool g_haveRaw = false;
 u3::PartyBytes g_lastRaw{};
 std::wstring g_lastHex;
 
 bool g_live = false;
 u3::Party g_party;  // last decoded party, for building the Pool gold menu
+
+// Dragging an item between carried lists.
+UINT g_dragListMsg;
+int g_dragFrom = -1, g_dropTo = -1;
+u3::CarriedItem g_dragItem;
 
 std::atomic<bool> g_wantRescan{false}, g_wantNext{false};
 std::atomic<int> g_action{0};
@@ -175,19 +235,11 @@ HWND Label(const wchar_t* text, HFONT font, DWORD type = SS_LEFTNOWORDWRAP) {
 }
 
 void CreateControls() {
-    g_statusText = Label(L"Looking for DOSBox…", g_font, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
-    g_speedText = Label(L"", g_fontBold, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
-    g_rescan = Child(L"BUTTON", L"&Rescan", BS_PUSHBUTTON | WS_TABSTOP, g_font, IDC_RESCAN);
-    g_next = Child(L"BUTTON", L"&Next source", BS_PUSHBUTTON | WS_TABSTOP, g_font, IDC_NEXT);
-    g_topmost = Child(L"BUTTON", L"Always on &top", BS_AUTOCHECKBOX | WS_TABSTOP, g_font, IDC_TOPMOST);
-    g_rawCheck = Child(L"BUTTON", L"Raw &bytes", BS_AUTOCHECKBOX | WS_TABSTOP, g_font, IDC_RAW);
-    SendMessageW(g_topmost, BM_SETCHECK, BST_CHECKED, 0);
-
     for (int i = 0; i < 4; ++i) {
         CharCtl& c = g_chars[i];
         c.name = Label(L"— empty —", g_fontName, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
         c.kind = Label(L"", g_font, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
-        c.status = Label(L"", g_fontBold);
+        c.status = Label(L"", g_font, SS_RIGHT);
         c.hpBar = Child(PROGRESS_CLASSW, L"", 0, g_font);
         for (int r = 0; r < ROW_COUNT; ++r) {
             c.rowLbl[r] = Label(ROW_LABELS[r], g_font);
@@ -198,11 +250,13 @@ void CreateControls() {
             c.statVal[k] = Label(L"", g_fontBold, SS_RIGHT);
             c.cntLbl[k] = Label(COUNTER_LABELS[k], g_font);
             c.cntVal[k] = Label(L"", g_fontBold, SS_RIGHT);
-            c.sep[k] = Child(L"STATIC", L"", SS_ETCHEDHORZ, g_font);
         }
+        for (HWND& sep : c.sep) sep = Child(L"STATIC", L"", SS_ETCHEDHORZ, g_font);
         c.carryLbl = Label(L"Carrying", g_font);
-        c.carryList = Child(L"LISTBOX", L"", LBS_NOINTEGRALHEIGHT | LBS_NOSEL | WS_VSCROLL, g_font, 0,
-                            WS_EX_CLIENTEDGE);
+        // Owner drawn so equipped items can be shown in bold.
+        c.carryList = Child(L"LISTBOX", L"", LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_VSCROLL,
+                            g_font, 0, WS_EX_CLIENTEDGE);
+        MakeDragList(c.carryList);  // items can be dragged onto another member
 
         // The group box goes to the bottom of the z-order and clips its
         // siblings, so it never paints over the controls it frames.
@@ -216,8 +270,8 @@ void CreateControls() {
                       g_fontMono, IDC_RAWEDIT, WS_EX_CLIENTEDGE);
     ShowWindow(g_rawEdit, SW_HIDE);
 
-    g_statusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready.", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0,
-                                  0, g_hwnd, nullptr, g_inst, nullptr);
+    g_statusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0,
+                                  g_hwnd, nullptr, g_inst, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -225,10 +279,12 @@ void CreateControls() {
 // ---------------------------------------------------------------------------
 
 constexpr int RAW_HEIGHT = 190;
+constexpr int CARRY_LINES = 5;         // the Carrying list scrolls beyond this
+constexpr int SPEED_PART_WIDTH = 400;  // status bar part showing game speed
 
-void LayoutChar(CharCtl& c, int gx, int gy, int gw, int gh) {
-    MoveWindow(c.group, gx, gy, gw, gh, FALSE);
-
+// Places one party member's controls from the top of its column and sizes the
+// group box to fit them; returns that height.
+int LayoutChar(CharCtl& c, int gx, int gy, int gw) {
     const int pad = S(10), L = g_lineH;
     const int x = gx + pad, w = gw - 2 * pad;
     int y = gy + L + S(4);
@@ -256,9 +312,12 @@ void LayoutChar(CharCtl& c, int gx, int gy, int gw, int gh) {
         y += 2 * L;
     };
 
-    line(c.name, g_nameH);
+    // The condition sits at the right end of the name row, in the regular font.
+    const int statusW = S(76);
+    MoveWindow(c.name, x, y, w - statusW, g_nameH, FALSE);
+    MoveWindow(c.status, x + w - statusW, y + g_nameH - L, statusW, L, FALSE);
+    y += g_nameH;
     line(c.kind, L);
-    line(c.status, L);
     y += S(4);
     row(ROW_HP);
     MoveWindow(c.hpBar, x, y + S(2), w, S(14), FALSE);
@@ -271,17 +330,17 @@ void LayoutChar(CharCtl& c, int gx, int gy, int gw, int gh) {
     row(ROW_FOOD);
     row(ROW_GOLD);
     rule(c.sep[2]);
-    row(ROW_WEAPON);
-    row(ROW_ARMOUR);
-    rule(c.sep[3]);
     line(c.carryLbl, L);
 
-    // The carried list soaks up whatever height is left above the counters.
-    int countersY = gy + gh - pad - 2 * L;
-    int listH = std::max(countersY - S(8) - y, S(40));
+    // Room for a handful of items; the list scrolls when there are more.
+    const int listH = CARRY_LINES * L + S(4);
     MoveWindow(c.carryList, x, y, w, listH, FALSE);
-    y = std::max(countersY, y + listH + S(8));
+    y += listH + S(8);
     grid(c.cntLbl, c.cntVal);
+
+    const int height = y + pad - gy;
+    MoveWindow(c.group, gx, gy, gw, height, FALSE);
+    return height;
 }
 
 void Layout() {
@@ -291,51 +350,62 @@ void Layout() {
     RECT sb;
     GetWindowRect(g_statusBar, &sb);
     const int W = rc.right, H = rc.bottom - (sb.bottom - sb.top);
-    const int m = S(10), gap = S(8), btnH = S(26);
+    const int m = S(10), gap = S(8);
 
-    int x = W - m;
-    auto placeRight = [&](HWND h, int width) {
-        x -= width;
-        MoveWindow(h, x, m, width, btnH, FALSE);
-        x -= S(6);
-    };
-    placeRight(g_rawCheck, S(92));
-    placeRight(g_topmost, S(118));
-    placeRight(g_next, S(96));
-    placeRight(g_rescan, S(80));
-    MoveWindow(g_statusText, m, m + (btnH - g_lineH) / 2, std::max(0, x - m), g_lineH, FALSE);
-
-    const int speedY = m + btnH + S(4);
-    MoveWindow(g_speedText, m, speedY, W - 2 * m, g_lineH, FALSE);
-
-    const int rawH = g_showRaw ? S(RAW_HEIGHT) : 0;
-    const int top = speedY + g_lineH + gap;
-    const int bottom = H - m - (g_showRaw ? rawH + gap : 0);
-    if (g_showRaw) MoveWindow(g_rawEdit, m, H - m - rawH, W - 2 * m, rawH, FALSE);
+    const int parts[2] = {std::max(W - S(SPEED_PART_WIDTH), S(120)), -1};
+    SendMessageW(g_statusBar, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
+    for (int i = 0; i < 2; ++i)
+        SendMessageW(g_statusBar, SB_SETTEXTW, i, reinterpret_cast<LPARAM>(g_statusParts[i].c_str()));
 
     const int colW = (W - 2 * m - 3 * gap) / 4;
-    const int groupH = std::max(bottom - top, S(200));
-    for (int i = 0; i < 4; ++i) LayoutChar(g_chars[i], m + i * (colW + gap), top, colW, groupH);
+    for (int i = 0; i < 4; ++i) g_columnH = LayoutChar(g_chars[i], m + i * (colW + gap), m, colW);
+
+    // The raw pane takes whatever is left below the columns.
+    const int rawY = m + g_columnH + gap;
+    if (g_showRaw) MoveWindow(g_rawEdit, m, rawY, W - 2 * m, std::max(H - m - rawY, S(60)), FALSE);
 
     RedrawWindow(g_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+// Client height that shows the party columns in full, plus the raw pane when open.
+int MinClientHeight() {
+    RECT sb{};
+    if (g_statusBar) GetWindowRect(g_statusBar, &sb);
+    const int columnH = g_columnH ? g_columnH : S(600);
+    return 2 * S(10) + columnH + (sb.bottom - sb.top) + (g_showRaw ? S(RAW_HEIGHT) + S(8) : 0);
+}
+
+SIZE WindowSizeFor(HWND hwnd, int clientW, int clientH) {
+    RECT r{0, 0, clientW, clientH};
+    AdjustWindowRectEx(&r, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)), GetMenu(hwnd) != nullptr,
+                       static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE)));
+    return {r.right - r.left, r.bottom - r.top};
 }
 
 // ---------------------------------------------------------------------------
 // Rendering snapshots
 // ---------------------------------------------------------------------------
 
-void SetStatus(const std::wstring& text, COLORREF colour) {
-    SetText(g_statusText, text);
-    if (colour != g_statusColor) {
-        g_statusColor = colour;
-        InvalidateRect(g_statusText, nullptr, TRUE);
-    }
+void SetStatusPart(int part, const std::wstring& text) {
+    if (g_statusParts[part] == text) return;
+    g_statusParts[part] = text;
+    SendMessageW(g_statusBar, SB_SETTEXTW, part, reinterpret_cast<LPARAM>(text.c_str()));
 }
 
 void SetBar(CharCtl& c, int max, int pos, int state) {
-    if (max != c.barMax) SendMessageW(c.hpBar, PBM_SETRANGE32, 0, c.barMax = max);
-    if (state != c.barState) SendMessageW(c.hpBar, PBM_SETSTATE, c.barState = state, 0);
-    if (pos != c.barPos) SendMessageW(c.hpBar, PBM_SETPOS, c.barPos = pos, 0);
+    if (max == c.barMax && pos == c.barPos && state == c.barState) return;
+    c.barMax = max;
+    c.barPos = pos;
+    c.barState = state;
+    // A themed bar ignores new positions while yellow (paused) or red (error)
+    // and animates any growth. So go normal, jump straight to the position by
+    // overshooting one and stepping back, then apply the colour.
+    SendMessageW(c.hpBar, PBM_SETSTATE, PBST_NORMAL, 0);
+    SendMessageW(c.hpBar, PBM_SETRANGE32, 0, max + 1);
+    SendMessageW(c.hpBar, PBM_SETPOS, pos + 1, 0);
+    SendMessageW(c.hpBar, PBM_SETPOS, pos, 0);
+    SendMessageW(c.hpBar, PBM_SETRANGE32, 0, max);
+    SendMessageW(c.hpBar, PBM_SETSTATE, state, 0);
 }
 
 void SetCarried(CharCtl& c, std::vector<std::wstring> items) {
@@ -365,6 +435,7 @@ void ShowEmpty(CharCtl& c, int slot) {
     for (HWND h : c.rowVal) SetText(h, L"");
     for (HWND h : c.statVal) SetText(h, L"");
     for (HWND h : c.cntVal) SetText(h, L"");
+    c.items.clear();
     SetCarried(c, {});
 }
 
@@ -377,9 +448,9 @@ COLORREF StatusColour(char code) {
     }
 }
 
-void Fill(CharCtl& c, const u3::Character& ch, int slot, int rosterSlot) {
+void Fill(CharCtl& c, const u3::Character& ch, int slot) {
     SetEmptyFlag(c, false);
-    SetText(c.group, Format(L"Party member %d  ·  roster %d", slot + 1, rosterSlot));
+    SetText(c.group, Format(L"Party member %d", slot + 1));
     SetText(c.name, ch.name.empty() ? L"(unnamed)" : ch.name);
     SetText(c.kind, ch.race + L" " + ch.klass + L"  ·  " + ch.sex);
     SetText(c.status, ch.status);
@@ -403,8 +474,6 @@ void Fill(CharCtl& c, const u3::Character& ch, int slot, int rosterSlot) {
     SetText(c.rowVal[ROW_EXP], Num(ch.exp));
     SetText(c.rowVal[ROW_FOOD], Num(ch.food));
     SetText(c.rowVal[ROW_GOLD], Num(ch.gold));
-    SetText(c.rowVal[ROW_WEAPON], ch.weapon);
-    SetText(c.rowVal[ROW_ARMOUR], ch.armour);
 
     const int stats[4] = {ch.strength, ch.dexterity, ch.intelligence, ch.wisdom};
     const int counters[4] = {ch.gems, ch.keys, ch.powders, ch.torches};
@@ -413,10 +482,16 @@ void Fill(CharCtl& c, const u3::Character& ch, int slot, int rosterSlot) {
         SetText(c.cntVal[k], Num(counters[k]));
     }
 
-    std::vector<std::wstring> items;
-    for (const auto& item : ch.carried) items.push_back(Format(L"%ls  × %d", item.first.c_str(), item.second));
-    if (items.empty()) items.push_back(L"(nothing)");
-    SetCarried(c, std::move(items));
+    std::vector<std::wstring> lines;
+    for (const auto& item : ch.carried) lines.push_back(Format(L"%ls  × %d", item.name.c_str(), item.count));
+    if (lines.empty()) lines.push_back(L"(nothing)");
+    // Equipping changes no text, so repaint when only that changed.
+    bool repaint = false;
+    for (size_t i = 0; i < ch.carried.size() && i < c.items.size(); ++i)
+        repaint = repaint || ch.carried[i].equipped != c.items[i].equipped;
+    c.items = ch.carried;
+    SetCarried(c, std::move(lines));
+    if (repaint) InvalidateRect(c.carryList, nullptr, TRUE);
 }
 
 std::wstring HexDump(const uint8_t* d) {
@@ -462,48 +537,65 @@ std::wstring DescribeSpeed(const u3::GameSpeed& speed) {
 
 void RenderSpeed(const Snapshot& s) {
     std::wstring text = L"Game speed: ";
-    COLORREF colour;
     if (s.speed.sites == 0) {
-        text += DescribeSpeed(u3::GameSpeed{PASS_STEPS[g_step], g_paused}) + L"  (waiting for the game)";
-        colour = GetSysColor(COLOR_GRAYTEXT);
+        text += DescribeSpeed(u3::GameSpeed{PASS_STEPS[g_step], g_paused}) + L" (waiting for the game)";
     } else {
-        const u3::GameSpeed& actual = s.speed.actual;
-        text += DescribeSpeed(actual);
-        if (!s.speed.applied) text += L"  — " + s.speed.error;
-        colour = actual.paused                                     ? COL_SPEED_PAUSED
-                 : actual.passSeconds != u3::NORMAL_PASS_SECONDS ? COL_SPEED_CHANGED
-                                                                   : GetSysColor(COLOR_WINDOWTEXT);
+        text += DescribeSpeed(s.speed.actual);
+        if (!s.speed.applied) text += L" — " + s.speed.error;
     }
-    SetText(g_speedText, text);
-    if (colour != g_speedColor) {
-        g_speedColor = colour;
-        InvalidateRect(g_speedText, nullptr, TRUE);
+    SetStatusPart(1, L"\t\t" + text);  // two tabs right-align it
+}
+
+// Hands the reference windows what the Spells "Castable only" filter needs.
+void UpdateReferences(const Snapshot& s, const u3::Party* party) {
+    u3ref::PartyState state;
+    if (party) {
+        state.live = true;
+        state.map = party->map;
+        state.combatTurn = s.combatTurn;
+        state.count = std::min(party->count, 4);
+        for (int i = 0; i < state.count; ++i) {
+            const u3::Character& ch = party->chars[i];
+            u3ref::Caster& caster = state.members[i];
+            caster.name = ch.name;
+            caster.classCode = static_cast<wchar_t>(static_cast<unsigned char>(ch.classCode));
+            caster.alive = ch.present && (ch.statusCode == 'G' || ch.statusCode == 'P');
+            caster.mp = ch.mp;
+        }
     }
+    u3ref::UpdateParty(state);
 }
 
 void Render(const Snapshot& s) {
     g_live = s.ok;
+    g_sourceCount = s.ok ? s.candidates : 0;
+    g_sourceIndex = s.index;
+    SetText(g_hwnd, std::wstring(APP_TITLE) + (s.ok ? L" (Connected)" : L" (Not connected)"));
     RenderSpeed(s);
     if (!s.ok) {
-        SetStatus(s.error.empty() ? L"Waiting for a party in memory…" : s.error, COL_POISONED);
+        g_debugInfo = s.pid ? Format(L"%ls (pid %lu), no party found", s.exe.c_str(), static_cast<unsigned long>(s.pid))
+                            : std::wstring(L"Not connected");
+        // Say why once, rather than overwriting later messages on every poll.
+        const std::wstring problem = s.error.empty() ? L"Waiting for a party in memory…" : s.error;
+        if (problem != g_problem) SetStatusPart(0, g_problem = problem);
         for (int i = 0; i < 4; ++i) ShowEmpty(g_chars[i], i);
+        UpdateReferences(s, nullptr);
         return;
+    }
+    if (!g_problem.empty()) {
+        g_problem.clear();
+        SetStatusPart(0, L"Connected to DOSBox.");
     }
 
     u3::Party party = u3::DecodeParty(s.raw.data());
     g_party = party;
-    std::wstring status = Format(L"Live  —  %d in party  —  %ls (pid %lu) @ ", party.count, s.exe.c_str(),
-                                 static_cast<unsigned long>(s.pid)) +
-                          Hex64(s.address);
-    if (s.candidates > 1)
-        status += Format(L"   [source %u of %u]", static_cast<unsigned>(s.index + 1),
-                         static_cast<unsigned>(s.candidates));
-    SetStatus(status, COL_GOOD);
+    UpdateReferences(s, &party);
+    g_debugInfo = Format(L"%ls (pid %lu) @ ", s.exe.c_str(), static_cast<unsigned long>(s.pid)) + Hex64(s.address);
 
     for (int i = 0; i < 4; ++i) {
         const u3::Character& ch = party.chars[i];
         if (i < party.count && ch.present)
-            Fill(g_chars[i], ch, i, party.slots[i]);
+            Fill(g_chars[i], ch, i);
         else
             ShowEmpty(g_chars[i], i);
     }
@@ -519,8 +611,28 @@ void Render(const Snapshot& s) {
 
 u3::GameSpeed WantedSpeed() { return u3::GameSpeed{g_wantSeconds, g_wantPaused}; }
 
+// The game's shops unequip a character's weapon or armour on any sale. Put it
+// back when they still own it, by comparing this poll with the last one.
+void RestoreSoldEquipment(u3::DosBoxReader& reader, u3::PartyBytes& previous, uint64_t& previousAt,
+                          u3::PartyBytes& current) {
+    const uint64_t at = reader.Address();
+    if (previousAt == at && reader.canWrite) {
+        const std::vector<u3::Equip> lost = u3::EquipmentLostToSale(previous.data(), current.data());
+        for (const u3::Equip& equip : lost) {
+            auto result = std::make_unique<u3::ActionResult>(reader.SetEquipped(equip));
+            if (result->ok) result->message = L"Re-equipped after the sale: " + result->message;
+            if (PostMessageW(g_hwnd, WM_APP_ACTION, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+        }
+        if (!lost.empty()) reader.Poll(current);  // show the restored equipment straight away
+    }
+    previous = current;
+    previousAt = at;
+}
+
 DWORD WINAPI Worker(LPVOID) {
     u3::DosBoxReader reader;
+    u3::PartyBytes previous{};
+    uint64_t previousAt = 0;  // where `previous` was read from; 0 when there's nothing to compare
     for (;;) {
         if (g_wantRescan.exchange(false) && reader.Attach()) reader.Scan();
         if (g_wantNext.exchange(false)) reader.NextCandidate();
@@ -530,6 +642,16 @@ DWORD WINAPI Worker(LPVOID) {
             u3::PartyBytes current;
             if (!reader.Poll(current))
                 result->message = reader.lastError.empty() ? L"No party in memory." : reader.lastError;
+            else if (action & ACTION_EQUIP)
+                *result = reader.SetEquipped(UnpackEquip(action));
+            else if (action & ACTION_MOVE)
+                *result = reader.MoveItems(UnpackMove(action));
+            else if (action >= ACTION_CURE && action < ACTION_CURE + 4)
+                *result = reader.Cure(action - ACTION_CURE);
+            else if (action >= ACTION_HEAL && action < ACTION_HEAL + 4)
+                *result = reader.FullHealth(action - ACTION_HEAL);
+            else if (action >= ACTION_REVIVE && action < ACTION_REVIVE + 4)
+                *result = reader.Revive(action - ACTION_REVIVE);
             else if (action == ACTION_FOOD)
                 *result = reader.DistributeFood();
             else
@@ -539,7 +661,13 @@ DWORD WINAPI Worker(LPVOID) {
 
         auto snap = std::make_unique<Snapshot>();
         snap->ok = reader.Poll(snap->raw);
-        if (snap->ok) snap->speed = reader.SyncSpeed(WantedSpeed());
+        if (snap->ok) {
+            RestoreSoldEquipment(reader, previous, previousAt, snap->raw);
+            snap->combatTurn = reader.CombatTurn();
+            snap->speed = reader.SyncSpeed(WantedSpeed());
+        } else {
+            previousAt = 0;
+        }
         snap->error = reader.lastError;
         snap->exe = reader.exe;
         snap->pid = reader.pid;
@@ -566,7 +694,7 @@ DWORD WINAPI Worker(LPVOID) {
 // ---------------------------------------------------------------------------
 
 void RequestAction(int action, const wchar_t* pending) {
-    SendMessageW(g_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(pending));
+    SetStatusPart(0, pending);
     g_action = action;
     SetEvent(g_wakeEvent);
 }
@@ -590,21 +718,58 @@ std::wstring MenuEscape(const std::wstring& s) {
     return out;
 }
 
-void RebuildPoolMenu() {
-    while (GetMenuItemCount(g_poolMenu) > 0) DeleteMenu(g_poolMenu, 0, MF_BYPOSITION);
+// Fills a sub-menu with one item per party member. `describe(character, &info)`
+// supplies the text after the tab and returns whether the item applies.
+template <typename Describe>
+void RebuildMemberMenu(HMENU menu, int baseId, Describe describe) {
+    while (GetMenuItemCount(menu) > 0) DeleteMenu(menu, 0, MF_BYPOSITION);
     if (g_live) {
         for (int i = 0; i < g_party.count && i < 4; ++i) {
             const u3::Character& ch = g_party.chars[i];
-            AppendMenuW(g_poolMenu, MF_STRING, IDM_POOL_BASE + i,
-                        (MenuEscape(ch.name) + L"\t" + Num(ch.gold) + L" gold").c_str());
+            std::wstring info;
+            const bool applies = describe(ch, &info);
+            AppendMenuW(menu, MF_STRING | (applies ? 0 : MF_GRAYED), baseId + i,
+                        (MenuEscape(ch.name) + L"\t" + info).c_str());
         }
     }
-    if (GetMenuItemCount(g_poolMenu) == 0) AppendMenuW(g_poolMenu, MF_STRING | MF_GRAYED, 0, L"(no party)");
+    if (GetMenuItemCount(menu) == 0) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(no party)");
+}
+
+bool IsDead(const u3::Character& ch) { return ch.statusCode == 'D' || ch.statusCode == 'A'; }
+
+void RebuildPoolMenu() {
+    RebuildMemberMenu(g_poolMenu, IDM_POOL_BASE, [](const u3::Character& ch, std::wstring* info) {
+        *info = Num(ch.gold) + L" gold";
+        return true;
+    });
+}
+
+void RebuildReviveMenu() {
+    RebuildMemberMenu(g_reviveMenu, IDM_REVIVE_BASE, [](const u3::Character& ch, std::wstring* info) {
+        *info = ch.status;
+        return IsDead(ch);
+    });
+}
+
+void RebuildHealMenu() {
+    RebuildMemberMenu(g_healMenu, IDM_HEAL_BASE, [](const u3::Character& ch, std::wstring* info) {
+        if (IsDead(ch)) {
+            *info = ch.status;
+            return false;
+        }
+        *info = Format(L"%ls / %ls HP", Num(ch.hp).c_str(), Num(ch.maxHp).c_str());
+        return ch.hp >= 0 && ch.maxHp > 0 && ch.hp < ch.maxHp;
+    });
+}
+
+void RebuildCureMenu() {
+    RebuildMemberMenu(g_cureMenu, IDM_CURE_BASE, [](const u3::Character& ch, std::wstring* info) {
+        *info = ch.status;
+        return ch.statusCode == 'P';
+    });
 }
 
 bool ColourFor(HWND h, COLORREF* colour) {
-    if (h == g_statusText && g_statusColor != CLR_INVALID) return *colour = g_statusColor, true;
-    if (h == g_speedText && g_speedColor != CLR_INVALID) return *colour = g_speedColor, true;
     for (const CharCtl& c : g_chars) {
         if (h == c.status) return *colour = c.statusColor, true;
         if (h == c.name && c.empty) return *colour = GetSysColor(COLOR_GRAYTEXT), true;
@@ -613,7 +778,7 @@ bool ColourFor(HWND h, COLORREF* colour) {
 }
 
 void ToggleRaw(HWND hwnd) {
-    g_showRaw = IsChecked(g_rawCheck);
+    g_showRaw = !g_showRaw;
     ShowWindow(g_rawEdit, g_showRaw ? SW_SHOW : SW_HIDE);
     g_lastHex.clear();
     UpdateRaw();
@@ -629,7 +794,353 @@ void ToggleRaw(HWND hwnd) {
     Layout();
 }
 
+// ---------------------------------------------------------------------------
+// Pop-ups
+// ---------------------------------------------------------------------------
+
+// A captioned pop-up with the given client size, centred over the main window.
+HWND CreatePopup(const wchar_t* cls, const wchar_t* title, int clientW, int clientH) {
+    RECT rc{0, 0, clientW, clientH};
+    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, exStyle = WS_EX_DLGMODALFRAME;
+    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    RECT owner;
+    GetWindowRect(g_hwnd, &owner);
+    return CreateWindowExW(exStyle, cls, title, style, owner.left + (owner.right - owner.left - w) / 2,
+                           owner.top + (owner.bottom - owner.top - h) / 2, w, h, g_hwnd, nullptr, g_inst, nullptr);
+}
+
+HWND PopupChild(HWND dlg, const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int h,
+                DWORD exStyle = 0) {
+    HWND c = CreateWindowExW(exStyle, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, dlg,
+                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_inst, nullptr);
+    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
+    return c;
+}
+
+// Shows `dlg` modally until `done`, then destroys it. Snapshots keep arriving
+// for the main window meanwhile.
+void RunModal(HWND dlg, HWND focus, const bool& done) {
+    EnableWindow(g_hwnd, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(focus);
+
+    MSG msg;
+    while (!done) {
+        const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (!IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(g_hwnd, TRUE);  // before destroying, so activation returns to the main window
+    DestroyWindow(dlg);
+}
+
+// Preferences --------------------------------------------------------------
+
+struct PrefsDialog {
+    HWND topmostCheck = nullptr;
+    bool topmost = false;
+    bool done = false, accepted = false;
+} g_prefs;
+
+void SetTopmost(bool on) {
+    g_topmost = on;
+    SetWindowPos(g_hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    u3ref::SetTopmost(on);
+    settings::SetInt(L"Preferences", L"AlwaysOnTop", on ? 1 : 0);
+}
+
+LRESULT CALLBACK PrefsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) {
+                g_prefs.accepted = LOWORD(wp) == IDOK;
+                g_prefs.topmost = IsChecked(g_prefs.topmostCheck);
+                g_prefs.done = true;
+                return 0;
+            }
+            break;
+        case DM_GETDEFID:
+            return MAKELRESULT(IDOK, DC_HASDEFID);
+        case WM_CLOSE:
+            g_prefs.done = true;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void ShowPreferences() {
+    g_prefs = PrefsDialog{};
+    const int pad = S(12), rowH = S(26), btnW = S(80), clientW = S(300);
+    const int buttonsY = pad + rowH + S(14);
+    HWND dlg = CreatePopup(L"U3StatsPrefs", L"Preferences", clientW, buttonsY + rowH + pad);
+    if (!dlg) return;
+
+    g_prefs.topmostCheck = PopupChild(dlg, L"BUTTON", L"Always on &top", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_TOPMOST,
+                                      pad, pad, clientW - 2 * pad, rowH);
+    SendMessageW(g_prefs.topmostCheck, BM_SETCHECK, g_topmost ? BST_CHECKED : BST_UNCHECKED, 0);
+    PopupChild(dlg, L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, clientW - pad - 2 * btnW - S(8), buttonsY,
+               btnW, rowH);
+    PopupChild(dlg, L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, clientW - pad - btnW, buttonsY, btnW,
+               rowH);
+
+    RunModal(dlg, g_prefs.topmostCheck, g_prefs.done);
+    if (g_prefs.accepted && g_prefs.topmost != g_topmost) SetTopmost(g_prefs.topmost);
+}
+
+// Item count ---------------------------------------------------------------
+
+struct CountPrompt {
+    HWND edit = nullptr;
+    int max = 1, value = 1;
+    bool done = false, accepted = false;
+} g_prompt;
+
+void SetPromptValue(int value) {
+    g_prompt.value = std::min(std::max(value, 1), g_prompt.max);
+    SetText(g_prompt.edit, std::to_wstring(g_prompt.value));
+}
+
+LRESULT CALLBACK PromptProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_COMMAND:
+            switch (LOWORD(wp)) {
+                case IDC_MINUS:
+                    SetPromptValue(g_prompt.value - 1);
+                    return 0;
+                case IDC_PLUS:
+                    SetPromptValue(g_prompt.value + 1);
+                    return 0;
+                case IDC_COUNT:
+                    if (HIWORD(wp) == EN_CHANGE) {
+                        // Track what's typed, but only tidy the text once focus leaves.
+                        wchar_t buf[8];
+                        GetWindowTextW(g_prompt.edit, buf, 8);
+                        g_prompt.value = std::min(std::max(_wtoi(buf), 1), g_prompt.max);
+                    } else if (HIWORD(wp) == EN_KILLFOCUS) {
+                        SetPromptValue(g_prompt.value);
+                    }
+                    return 0;
+                case IDOK:
+                    g_prompt.accepted = g_prompt.done = true;
+                    return 0;
+                case IDCANCEL:
+                    g_prompt.done = true;
+                    return 0;
+            }
+            break;
+        case WM_MOUSEWHEEL:
+            SetPromptValue(g_prompt.value + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1));
+            return 0;
+        case DM_GETDEFID:
+            return MAKELRESULT(IDOK, DC_HASDEFID);
+        case WM_CLOSE:
+            g_prompt.done = true;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// Modal pop-up asking for 1..max, starting at max. Returns 0 if cancelled.
+int AskCount(const std::wstring& prompt, int max) {
+    g_prompt = CountPrompt{};
+    g_prompt.max = max;
+
+    const int pad = S(12), rowH = S(26), step = S(28), editW = S(56), btnW = S(80), clientW = S(340);
+    const int textH = 2 * g_lineH, countY = pad + textH + S(6), buttonsY = countY + rowH + S(14);
+    HWND dlg = CreatePopup(L"U3StatsCount", L"Move items", clientW, buttonsY + rowH + pad);
+    if (!dlg) return 0;
+
+    PopupChild(dlg, L"STATIC", prompt.c_str(), SS_NOPREFIX, 0, pad, pad, clientW - 2 * pad, textH);
+    int x = pad;
+    PopupChild(dlg, L"BUTTON", L"−", BS_PUSHBUTTON | WS_TABSTOP, IDC_MINUS, x, countY, step, rowH);
+    x += step + S(4);
+    g_prompt.edit = PopupChild(dlg, L"EDIT", L"", ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL | WS_TABSTOP, IDC_COUNT, x,
+                               countY, editW, rowH, WS_EX_CLIENTEDGE);
+    SendMessageW(g_prompt.edit, EM_SETLIMITTEXT, 2, 0);
+    x += editW + S(4);
+    PopupChild(dlg, L"BUTTON", L"+", BS_PUSHBUTTON | WS_TABSTOP, IDC_PLUS, x, countY, step, rowH);
+    x += step + S(10);
+    PopupChild(dlg, L"STATIC", Format(L"of %d", max).c_str(), SS_NOPREFIX | SS_CENTERIMAGE, 0, x, countY,
+               clientW - pad - x, rowH);
+    PopupChild(dlg, L"BUTTON", L"Move", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, clientW - pad - 2 * btnW - S(8),
+               buttonsY, btnW, rowH);
+    PopupChild(dlg, L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, clientW - pad - btnW, buttonsY, btnW,
+               rowH);
+    SetPromptValue(max);
+    SendMessageW(g_prompt.edit, EM_SETSEL, 0, -1);
+
+    RunModal(dlg, g_prompt.edit, g_prompt.done);
+    return g_prompt.accepted ? g_prompt.value : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Dragging items between party members
+// ---------------------------------------------------------------------------
+
+int CarryListOwner(HWND list) {
+    for (int i = 0; i < 4; ++i)
+        if (g_chars[i].carryList == list) return i;
+    return -1;
+}
+
+// The other live party member whose column is under a screen point, or -1.
+int DropTarget(POINT pt) {
+    if (!g_live || g_dragFrom < 0) return -1;
+    for (int i = 0; i < g_party.count && i < 4; ++i) {
+        RECT r;
+        GetWindowRect(g_chars[i].group, &r);
+        if (i != g_dragFrom && PtInRect(&r, pt)) return i;
+    }
+    return -1;
+}
+
+void GiveItems(int from, int to, const u3::CarriedItem& item) {
+    if (!g_live || !g_haveRaw) return;
+    u3::ItemMove move;
+    move.from = from;
+    move.to = to;
+    move.armour = item.armour;
+    move.type = item.type;
+
+    std::wstring why;
+    const int movable = u3::MovableItems(g_lastRaw.data(), move, &why);
+    if (movable == 0) {
+        MessageBoxW(g_hwnd, why.c_str(), APP_TITLE, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    // Offer no more than the dragged line shows: the equipped item and its
+    // spares are separate lines.
+    move.count = std::min(movable, item.count);
+    if (item.count > 1) {
+        move.count = AskCount(Format(L"Move how many %ls from %ls to %ls?", item.name.c_str(),
+                                     g_party.chars[from].name.c_str(), g_party.chars[to].name.c_str()),
+                              move.count);
+        if (move.count == 0) return;
+    }
+    RequestAction(PackMove(move), L"Moving items…");
+}
+
+LRESULT OnDragList(const DRAGLISTINFO& info) {
+    switch (info.uNotification) {
+        case DL_BEGINDRAG: {
+            const int from = CarryListOwner(info.hWnd);
+            const int line = LBItemFromPt(info.hWnd, info.ptCursor, FALSE);
+            if (!g_live || g_party.count < 2 || from < 0 || from >= g_party.count || line < 0 ||
+                line >= static_cast<int>(g_chars[from].items.size()))
+                return FALSE;
+            g_dragFrom = from;
+            g_dragItem = g_chars[from].items[line];
+            SetStatusPart(0, L"Drop on another party member to hand the item over.");
+            return TRUE;
+        }
+        case DL_DRAGGING:
+            return DropTarget(info.ptCursor) >= 0 ? DL_MOVECURSOR : DL_STOPCURSOR;
+        case DL_DROPPED:
+            g_dropTo = DropTarget(info.ptCursor);
+            SendMessageW(info.hWnd, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            // Let the list box finish the drag before a pop-up takes over.
+            if (g_dropTo >= 0) PostMessageW(g_hwnd, WM_APP_DROP, 0, 0);
+            else g_dragFrom = -1;
+            return 0;
+        case DL_CANCELDRAG:
+            g_dragFrom = -1;
+            SendMessageW(info.hWnd, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            return 0;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Carried lists: drawing and the equip menu
+// ---------------------------------------------------------------------------
+
+// Equipped items are drawn in bold with a grey "readied" / "worn" tag.
+void DrawCarriedLine(const DRAWITEMSTRUCT& di) {
+    const bool selected = (di.itemState & ODS_SELECTED) != 0;
+    FillRect(di.hDC, &di.rcItem, GetSysColorBrush(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+    const int member = CarryListOwner(di.hwndItem);
+    if (member < 0 || di.itemID >= g_chars[member].carried.size()) return;
+
+    const CharCtl& c = g_chars[member];
+    const u3::CarriedItem* item = di.itemID < c.items.size() ? &c.items[di.itemID] : nullptr;  // else "(nothing)"
+    const bool equipped = item && item->equipped;
+    RECT r = di.rcItem;
+    r.left += S(4);
+    r.right -= S(4);
+    SetBkMode(di.hDC, TRANSPARENT);
+    HGDIOBJ oldFont = SelectObject(di.hDC, g_font);
+
+    if (equipped) {
+        const wchar_t* tag = item->armour ? L"worn" : L"readied";
+        RECT tr = r;
+        DrawTextW(di.hDC, tag, -1, &tr, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+        SetTextColor(di.hDC, GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_GRAYTEXT));
+        DrawTextW(di.hDC, tag, -1, &r, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+        r.right -= (tr.right - tr.left) + S(8);
+        SelectObject(di.hDC, g_fontBold);
+    }
+    SetTextColor(di.hDC, GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : item ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
+    DrawTextW(di.hDC, c.carried[di.itemID].c_str(), -1, &r,
+              DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    SelectObject(di.hDC, oldFont);
+    if (di.itemState & ODS_FOCUS) DrawFocusRect(di.hDC, &di.rcItem);
+}
+
+// Right-click on a carried item: Ready / Wear it, or put it away.
+void ShowItemMenu(int member, LPARAM lp) {
+    HWND list = g_chars[member].carryList;
+    POINT pt{static_cast<short>(LOWORD(lp)), static_cast<short>(HIWORD(lp))};
+    int line;
+    if (pt.x == -1 && pt.y == -1) {  // from the keyboard: use the selected line
+        line = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+        RECT r{};
+        SendMessageW(list, LB_GETITEMRECT, line, reinterpret_cast<LPARAM>(&r));
+        pt = {r.left + S(16), r.bottom};
+        ClientToScreen(list, &pt);
+    } else {
+        line = LBItemFromPt(list, pt, FALSE);
+    }
+    if (!g_live || !g_haveRaw || member >= g_party.count || line < 0 ||
+        line >= static_cast<int>(g_chars[member].items.size()))
+        return;
+
+    const u3::CarriedItem item = g_chars[member].items[line];
+    u3::Equip equip;
+    equip.member = member;
+    equip.armour = item.armour;
+    equip.type = item.equipped ? 0 : item.type;
+    const std::wstring label = (item.equipped ? (item.armour ? L"&Take off " : L"&Put away ")
+                                              : (item.armour ? L"&Wear " : L"&Ready ")) +
+                               item.name;
+    std::wstring problem = u3::EquipProblem(g_lastRaw.data(), equip);
+    // A spare of the type already in use has nothing left to ready or wear.
+    if (!item.equipped)
+        for (const auto& other : g_chars[member].items)
+            if (other.equipped && other.armour == item.armour && other.type == item.type)
+                problem = item.armour ? L"One is already being worn." : L"One is already readied.";
+
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (problem.empty() ? 0 : MF_GRAYED), IDM_EQUIP, label.c_str());
+    if (!problem.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, MenuEscape(problem).c_str());
+    SendMessageW(list, LB_SETCURSEL, line, 0);
+    const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwnd, nullptr);
+    SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+    DestroyMenu(menu);
+
+    if (cmd == IDM_EQUIP) RequestAction(PackEquip(equip), item.equipped ? L"Unequipping…" : L"Equipping…");
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (g_dragListMsg && msg == g_dragListMsg) return OnDragList(*reinterpret_cast<DRAGLISTINFO*>(lp));
+
     switch (msg) {
         case WM_CREATE:
             g_hwnd = hwnd;
@@ -646,8 +1157,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_GETMINMAXINFO: {
             auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
-            mm->ptMinTrackSize.x = S(900);
-            mm->ptMinTrackSize.y = S(724) + g_lineH + (g_showRaw ? S(RAW_HEIGHT) + S(8) : 0);
+            const SIZE min = WindowSizeFor(hwnd, S(900), MinClientHeight());
+            mm->ptMinTrackSize.x = min.cx;
+            mm->ptMinTrackSize.y = min.cy;
             return 0;
         }
 
@@ -671,22 +1183,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_NORMAL:
                     SetSpeed(NORMAL_STEP, false);
                     return 0;
-                case IDC_RESCAN:
-                    SetStatus(L"Scanning DOSBox memory…", GetSysColor(COLOR_WINDOWTEXT));
+                case IDM_PREFERENCES:
+                    ShowPreferences();
+                    return 0;
+                case IDM_RESCAN:
+                    SetStatusPart(0, L"Scanning DOSBox memory…");
                     g_wantRescan = true;
                     SetEvent(g_wakeEvent);
                     return 0;
-                case IDC_NEXT:
+                case IDM_NEXT:
                     g_wantNext = true;
                     SetEvent(g_wakeEvent);
                     return 0;
-                case IDC_TOPMOST:
-                    SetWindowPos(hwnd, IsChecked(g_topmost) ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                    return 0;
-                case IDC_RAW:
+                case IDM_RAW:
                     ToggleRaw(hwnd);
                     return 0;
+            }
+            if (LOWORD(wp) >= IDM_REFERENCE_BASE && LOWORD(wp) < IDM_REFERENCE_BASE + u3ref::KIND_COUNT) {
+                u3ref::Show(static_cast<u3ref::Kind>(LOWORD(wp) - IDM_REFERENCE_BASE), hwnd, g_font, g_dpi, g_topmost);
+                return 0;
+            }
+            if (LOWORD(wp) >= IDM_REVIVE_BASE && LOWORD(wp) < IDM_REVIVE_BASE + 4) {
+                RequestAction(ACTION_REVIVE + (LOWORD(wp) - IDM_REVIVE_BASE), L"Reviving…");
+                return 0;
+            }
+            if (LOWORD(wp) >= IDM_CURE_BASE && LOWORD(wp) < IDM_CURE_BASE + 4) {
+                RequestAction(ACTION_CURE + (LOWORD(wp) - IDM_CURE_BASE), L"Curing…");
+                return 0;
+            }
+            if (LOWORD(wp) >= IDM_HEAL_BASE && LOWORD(wp) < IDM_HEAL_BASE + 4) {
+                RequestAction(ACTION_HEAL + (LOWORD(wp) - IDM_HEAL_BASE), L"Healing…");
+                return 0;
             }
             if (LOWORD(wp) >= IDM_POOL_BASE && LOWORD(wp) < IDM_POOL_BASE + 4) {
                 RequestAction(ACTION_POOL + (LOWORD(wp) - IDM_POOL_BASE), L"Pooling gold…");
@@ -703,6 +1230,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 RebuildPoolMenu();
             } else if (reinterpret_cast<HMENU>(wp) == g_poolMenu) {
                 RebuildPoolMenu();  // refresh the gold figures
+            } else if (reinterpret_cast<HMENU>(wp) == g_cheatMenu || reinterpret_cast<HMENU>(wp) == g_reviveMenu ||
+                       reinterpret_cast<HMENU>(wp) == g_healMenu || reinterpret_cast<HMENU>(wp) == g_cureMenu) {
+                RebuildReviveMenu();  // refresh statuses and hit points
+                RebuildHealMenu();
+                RebuildCureMenu();
             } else if (reinterpret_cast<HMENU>(wp) == g_speedMenu) {
                 auto enable = [](int id, bool on) {
                     EnableMenuItem(g_speedMenu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
@@ -711,14 +1243,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 enable(IDM_SLOWER, g_paused || g_step < STEP_COUNT - 1);
                 enable(IDM_NORMAL, g_paused || g_step != NORMAL_STEP);
                 CheckMenuItem(g_speedMenu, IDM_PAUSE, MF_BYCOMMAND | (g_paused ? MF_CHECKED : MF_UNCHECKED));
+            } else if (reinterpret_cast<HMENU>(wp) == g_debugMenu) {
+                ModifyMenuW(g_debugMenu, IDM_DEBUG_INFO, MF_BYCOMMAND | MF_STRING | MF_GRAYED, IDM_DEBUG_INFO,
+                            MenuEscape(g_debugInfo).c_str());
+                // Only worth cycling when the scan found more than one copy.
+                const bool several = g_sourceCount > 1;
+                const std::wstring next = several ? Format(L"&Next source (%u of %u)",
+                                                           static_cast<unsigned>(g_sourceIndex + 1),
+                                                           static_cast<unsigned>(g_sourceCount))
+                                                  : std::wstring(L"&Next source");
+                ModifyMenuW(g_debugMenu, IDM_NEXT, MF_BYCOMMAND | MF_STRING | (several ? MF_ENABLED : MF_GRAYED),
+                            IDM_NEXT, next.c_str());
+                CheckMenuItem(g_debugMenu, IDM_RAW, MF_BYCOMMAND | (g_showRaw ? MF_CHECKED : MF_UNCHECKED));
             }
             return 0;
 
+        case WM_CONTEXTMENU: {
+            const int member = CarryListOwner(reinterpret_cast<HWND>(wp));
+            if (member < 0) break;
+            ShowItemMenu(member, lp);
+            return 0;
+        }
+
+        case WM_MEASUREITEM: {
+            auto* mi = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+            if (mi->CtlType != ODT_LISTBOX) break;
+            mi->itemHeight = g_lineH;
+            return TRUE;
+        }
+
+        case WM_DRAWITEM: {
+            const auto* di = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+            if (di->CtlType != ODT_LISTBOX) break;
+            DrawCarriedLine(*di);
+            return TRUE;
+        }
+
+        case WM_APP_DROP: {
+            const int from = g_dragFrom;
+            g_dragFrom = -1;
+            if (from >= 0 && g_dropTo >= 0) GiveItems(from, g_dropTo, g_dragItem);
+            return 0;
+        }
+
         case WM_APP_ACTION: {
             std::unique_ptr<u3::ActionResult> result(reinterpret_cast<u3::ActionResult*>(lp));
-            SendMessageW(g_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(result->message.c_str()));
-            if (!result->ok)
-                MessageBoxW(hwnd, result->message.c_str(), L"Ultima III — Party Stats", MB_OK | MB_ICONWARNING);
+            SetStatusPart(0, result->message);
+            if (!result->ok) MessageBoxW(hwnd, result->message.c_str(), APP_TITLE, MB_OK | MB_ICONWARNING);
             return 0;
         }
 
@@ -746,6 +1317,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_DESTROY:
+            settings::SaveWindow(L"Main", hwnd);
+            u3ref::SaveOpenWindows();
             SetEvent(g_stopEvent);
             WaitForSingleObject(g_thread, 5000);
             PostQuitMessage(0);
@@ -780,7 +1353,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
                                                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
     RegisterClassExW(&wc);
 
+    WNDCLASSEXW prompt = wc;
+    prompt.lpfnWndProc = PromptProc;
+    prompt.lpszClassName = L"U3StatsCount";
+    RegisterClassExW(&prompt);
+    prompt.lpfnWndProc = PrefsProc;
+    prompt.lpszClassName = L"U3StatsPrefs";
+    RegisterClassExW(&prompt);
+    u3ref::Register(inst, wc.hIcon, wc.hIconSm);
+
+    g_dragListMsg = RegisterWindowMessageW(DRAGLISTMSGSTRING);
+
     HMENU fileMenu = CreatePopupMenu();
+    AppendMenuW(fileMenu, MF_STRING, IDM_PREFERENCES, L"&Preferences…");
+    AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(fileMenu, MF_STRING, IDM_QUIT, L"&Quit\tAlt+F4");
 
     g_poolMenu = CreatePopupMenu();
@@ -801,12 +1387,44 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     AppendMenuW(g_speedMenu, MF_STRING, IDM_NORMAL, L"&Normal speed");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_speedMenu), L"Game &speed");
 
-    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"Ultima III — Party Stats",
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, S(1080), S(790), nullptr,
-                                menuBar, inst, nullptr);
+    HMENU referenceMenu = CreatePopupMenu();
+    AppendMenuW(referenceMenu, MF_STRING, IDM_REFERENCE_BASE + u3ref::WEAPONS, L"&Weapons");
+    AppendMenuW(referenceMenu, MF_STRING, IDM_REFERENCE_BASE + u3ref::ARMOUR, L"&Armour");
+    AppendMenuW(referenceMenu, MF_STRING, IDM_REFERENCE_BASE + u3ref::SPELLS, L"&Spells");
+    AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(referenceMenu), L"&Reference");
+
+    g_reviveMenu = CreatePopupMenu();
+    AppendMenuW(g_reviveMenu, MF_STRING | MF_GRAYED, 0, L"(no party)");  // filled in when opened
+    g_healMenu = CreatePopupMenu();
+    AppendMenuW(g_healMenu, MF_STRING | MF_GRAYED, 0, L"(no party)");
+    g_cheatMenu = CreatePopupMenu();
+    AppendMenuW(g_cheatMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_reviveMenu), L"&Revive");
+    AppendMenuW(g_cheatMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_healMenu), L"&Full health");
+    g_cureMenu = CreatePopupMenu();
+    AppendMenuW(g_cureMenu, MF_STRING | MF_GRAYED, 0, L"(no party)");
+    AppendMenuW(g_cheatMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_cureMenu), L"C&ure");
+    AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_cheatMenu), L"&Cheat");
+
+    g_debugMenu = CreatePopupMenu();
+    AppendMenuW(g_debugMenu, MF_STRING | MF_GRAYED, IDM_DEBUG_INFO, L"Not connected");  // refreshed when opened
+    AppendMenuW(g_debugMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_debugMenu, MF_STRING, IDM_RESCAN, L"&Rescan memory");
+    AppendMenuW(g_debugMenu, MF_STRING, IDM_NEXT, L"&Next source");
+    AppendMenuW(g_debugMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_debugMenu, MF_STRING, IDM_RAW, L"Raw &bytes");
+    AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_debugMenu), L"&Debug");
+
+    g_topmost = settings::GetInt(L"Preferences", L"AlwaysOnTop", 1) != 0;
+    const std::wstring title = std::wstring(APP_TITLE) + L" (Not connected)";
+    HWND hwnd = CreateWindowExW(g_topmost ? WS_EX_TOPMOST : 0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                CW_USEDEFAULT, S(1080), S(790), nullptr, menuBar, inst, nullptr);
     if (!hwnd) return 1;
-    ShowWindow(hwnd, show);
+    // Fit the height to the party columns.
+    const SIZE size = WindowSizeFor(hwnd, S(1080), MinClientHeight());
+    SetWindowPos(hwnd, nullptr, 0, 0, size.cx, size.cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (!settings::RestoreWindow(L"Main", hwnd)) ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
+    u3ref::RestoreOpenWindows(hwnd, g_font, g_dpi, g_topmost);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
