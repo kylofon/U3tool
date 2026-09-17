@@ -7,7 +7,7 @@ falls back to reading the DOSBox process's memory directly.
 
 Features:
 - Main window shows details about each party member, including their inventories.
-	- EXP indicator highlights when level up is available from Lord British.
+	- EXP indicator highlights when level up is available from Richard British.
 	- Drag and drop interface allows you to move items between characters.
 	- Wear and ready items directly from your inventory; equipment a shop unequips on a sale is put back.
 	- Pool gold or distribute food evenly between your characters.
