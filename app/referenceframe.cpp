@@ -155,6 +155,9 @@ ReferenceFrame::ReferenceFrame(Kind kind, wxWindow* owner, bool topmost)
                         std::max(work.y, std::min(anchor.y + step, work.GetBottom() + 1 - size.y))));
 
     wxToolTip::SetAutoPop(30000);
+#ifdef __WXMSW__
+    wxToolTip::SetMaxWidth(FromDIP(360));  // also lets the text break at line ends
+#endif
     list_->Bind(wxEVT_MOTION, &ReferenceFrame::OnMotion, this);
     list_->Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& event) {
         tipRow_ = -2;
@@ -240,10 +243,7 @@ void ReferenceFrame::OnMotion(wxMouseEvent& event) {
     // Removing the old tip first restarts the delay for the new row.
     list_->UnsetToolTip();
     const wxString text = u3::ref::UsersText(kind_, row, g_party);
-    if (!text.empty()) {
-        list_->SetToolTip(text);
-        if (wxToolTip* tip = list_->GetToolTip()) tip->SetMaxWidth(FromDIP(360));
-    }
+    if (!text.empty()) list_->SetToolTip(text);
 }
 
 void ReferenceFrame::OnClose(wxCloseEvent& event) {
