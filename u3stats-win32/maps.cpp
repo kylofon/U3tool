@@ -61,6 +61,9 @@ std::wstring g_folder;
 Tiles g_tiles;
 bool g_tilesLoaded = false;  // tried to load them from g_folder
 std::map<std::wstring, ExploredCells> g_progress;
+// The dungeon the party is in, for working out what it sees.
+int g_partyDungeon = -1;
+std::vector<uint8_t> g_partyDungeonData;
 
 int S(int v) { return MulDiv(v, g_dpi, 96); }
 
@@ -125,11 +128,19 @@ void SaveProgress(int dungeon, int level) {
                         ExploredToHex(Progress(dungeon, level)));
 }
 
-// Marks the party's cell and its eight neighbours as explored.
+// Marks what the party can see as explored.
 void Explore() {
     const int dungeon = CurrentDungeon();
     if (dungeon < 0 || !g_windows[DUNGEONS].frame) return;
-    if (ExploreAround(Progress(dungeon, g_where.level), g_where.x, g_where.y)) {
+    constexpr size_t LEVEL_CELLS = DUNGEON_SIZE * DUNGEON_SIZE;
+    if (dungeon != g_partyDungeon) {
+        g_partyDungeonData =
+            LoadGameFile(g_folder, DUNGEON_PLACES[dungeon].file, false, DUNGEON_LEVELS * LEVEL_CELLS);
+        g_partyDungeon = dungeon;
+    }
+    if (g_partyDungeonData.empty()) return;
+    if (ExploreView(Progress(dungeon, g_where.level), &g_partyDungeonData[g_where.level * LEVEL_CELLS], g_where.x,
+                    g_where.y, g_where.facing, g_where.torch > 0)) {
         SaveProgress(dungeon, g_where.level);
         if (g_windows[DUNGEONS].view) InvalidateRect(g_windows[DUNGEONS].view, nullptr, FALSE);
     }
@@ -566,6 +577,7 @@ void UpdateLocation(const Location& where, const std::wstring& gameFolder) {
         settings::SetString(L"Game", L"Folder", gameFolder);
         g_tiles = Tiles{};
         g_tilesLoaded = false;
+        g_partyDungeon = -1;  // reload it from the new folder
         for (int k = 0; k < KIND_COUNT; ++k)
             if (g_windows[k].frame) LoadPlace(static_cast<Kind>(k));
     }

@@ -94,6 +94,7 @@ struct Location {
     int x = 0, y = 0;            // position on the current map
     int level = 0;               // dungeon level, 0-7
     int facing = 0;              // in dungeons: 0 north, 1 east, 2 south, 3 west
+    int torch = 0;               // how long the lit torch lasts; 0 means dark
 };
 
 bool LooksLikeParty(const uint8_t* raw);

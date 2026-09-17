@@ -43,7 +43,8 @@ jobs:
               std::wcout << L"spell rows: " << u3::ref::TABLES[u3::ref::SPELLS].RowCount() << L"\n";
               std::wcout << L"world map pixels: " << u3::RenderWorld({}, u3::Tiles{}).size() << L"\n";
               u3::ExploredCells cells{};
-              u3::ExploreAround(cells, 0, 0);
+              std::vector<uint8_t> level(u3::DUNGEON_SIZE * u3::DUNGEON_SIZE);  // an open level
+              u3::ExploreView(cells, level.data(), 0, 0, 0, true);  // at the top-left corner, facing north
               std::wcout << L"explored: " << u3::ExploredToHex(cells) << L"\n";
               return attached ? 1 : 0;
           }

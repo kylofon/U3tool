@@ -74,9 +74,15 @@ extern const wchar_t* const DUNGEON_LEGEND;
 using ExploredCells = std::array<uint8_t, (DUNGEON_SIZE * DUNGEON_SIZE + 7) / 8>;
 
 bool IsExplored(const ExploredCells& cells, int x, int y);
-// Marks the cell and its eight neighbours (wrapping at the edges); returns
-// whether any were new.
-bool ExploreAround(ExploredCells& cells, int x, int y);
+
+// Marks what the party sees from (x, y) facing `facing` (0 north, 1 east,
+// 2 south, 3 west), the way the game's first-person view draws it: its own
+// cell always, and with a torch lit, a cone reaching three cells ahead (3, 5,
+// 7 and 7 cells wide) in which walls and doors hide what lies beyond them.
+// Nothing behind the party is seen. `level` is the level's 16 x 16 cells.
+// Returns whether any cell was new.
+bool ExploreView(ExploredCells& cells, const uint8_t* level, int x, int y, int facing, bool lit);
+
 std::wstring ExploredToHex(const ExploredCells& cells);
 ExploredCells ExploredFromHex(const std::wstring& hex);
 

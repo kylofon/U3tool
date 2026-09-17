@@ -209,8 +209,13 @@ but leaves alone a map you picked while the party stays put.
   red-hot rods (marks), gremlins, misty writing and the Time Lord (see the
   legend). A blinking red arrow marks the party and points the way it faces.
   * Without **Reveal**, only explored cells are shown. Walking around a dungeon
-    while this window is open explores the cells around the party, and what's
-    explored is kept per dungeon and level between runs.
+    while this window is open explores what the party can see, and what's
+    explored is kept per dungeon and level between runs. That follows the
+    game's own first-person view: the party's cell, and with a torch lit, the
+    cells beside it and a cone reaching three cells ahead (5, then 7 and 7
+    cells wide), where walls and doors hide what's beyond them. Nothing behind
+    the party counts until it turns. In the dark only the party's own cell is
+    explored.
   * **Reveal** shows the whole level.
   * **Clear** forgets what's been explored in the chosen dungeon, after asking.
 

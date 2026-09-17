@@ -425,6 +425,7 @@ bool DosBoxReader::ReadLocation(const PartyBytes& raw, Location& out) const {
     out.entryY = raw[H_ENTRY_Y];
     out.x = position[0] & 0x3F;
     out.y = position[1] & 0x3F;
+    out.torch = position[2];
     out.level = position[3] & 0x07;
     out.facing = facing & 0x03;
     return true;

@@ -5,6 +5,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <system_error>
 
 namespace u3 {
@@ -148,17 +149,80 @@ bool IsExplored(const ExploredCells& cells, int x, int y) {
     return (cells[i >> 3] >> (i & 7) & 1) != 0;
 }
 
-bool ExploreAround(ExploredCells& cells, int x, int y) {
+// The cells the dungeon view draws, relative to the party facing north
+// (negative y is ahead), numbered as in the game's dungeon drawing code
+// (its tables at 0107 and 0127). Some cells appear twice, once for each face
+// that can be seen:
+//
+//   15 16/1C 17/1D 18 19/1E 1A/1F 1B      three ahead
+//   0F 0A/10 0B/11 0C 0D/12 0E/13 14      two ahead
+//         06 03/07 04 05/08 09            one ahead
+//               01 00 02                  the party's row
+namespace {
+
+struct ViewCell {
+    int x, y;
+};
+constexpr ViewCell VIEW_CELLS[32] = {
+    {0, 0},   {-1, 0},  {1, 0},   {-1, -1}, {0, -1},  {1, -1},  {-2, -1}, {-1, -1},
+    {1, -1},  {2, -1},  {-2, -2}, {-1, -2}, {0, -2},  {1, -2},  {2, -2},  {-3, -2},
+    {-2, -2}, {-1, -2}, {1, -2},  {2, -2},  {3, -2},  {-3, -3}, {-2, -3}, {-1, -3},
+    {0, -3},  {1, -3},  {2, -3},  {3, -3},  {-2, -3}, {-1, -3}, {1, -3},  {2, -3},
+};
+
+}  // namespace
+
+bool ExploreView(ExploredCells& cells, const uint8_t* level, int x, int y, int facing, bool lit) {
     bool changed = false;
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            const int cx = (x + dx + DUNGEON_SIZE) % DUNGEON_SIZE, cy = (y + dy + DUNGEON_SIZE) % DUNGEON_SIZE;
-            const int i = cy * DUNGEON_SIZE + cx;
-            if (cells[i >> 3] & (1 << (i & 7))) continue;
+    constexpr int OPEN = 0, BLOCKED = -1, DOORWAY = 1;
+
+    // Marks one view cell as seen and says whether it blocks the view, as
+    // draw_dungeon_block does: walls, secret doors and doors do, except a door
+    // the party stands in.
+    auto see = [&](int block) {
+        int dx = VIEW_CELLS[block].x, dy = VIEW_CELLS[block].y;
+        for (int turn = 0; turn < facing; ++turn) {  // a quarter turn clockwise each
+            const int nx = -dy;
+            dy = dx;
+            dx = nx;
+        }
+        const int cx = (x + dx) & (DUNGEON_SIZE - 1), cy = (y + dy) & (DUNGEON_SIZE - 1);
+        const int i = cy * DUNGEON_SIZE + cx;
+        if (!(cells[i >> 3] & (1 << (i & 7)))) {
             cells[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
             changed = true;
         }
+        const uint8_t value = level[i];
+        if (!(value & 0x80)) return OPEN;
+        return value >= 0xC0 && block == 0 ? DOORWAY : BLOCKED;
+    };
+    // Cells along one line of sight, up to and including the first that blocks it.
+    auto line = [&](std::initializer_list<int> blocks) {
+        for (int block : blocks)
+            if (see(block) != OPEN) break;
+    };
+
+    // The party's own cell is known even in the dark; the rest needs a torch,
+    // and follows the order dungeon_main draws in.
+    if (!lit) {
+        see(0);
+        return changed;
     }
+    const int here = see(0);
+    if (here == BLOCKED) return changed;  // inside a wall
+    if (here == OPEN) {                   // from a doorway only the way ahead is seen
+        line({0x01, 0x03, 0x06, 0x0A, 0x0F, 0x15});
+        line({0x02, 0x05, 0x09, 0x0E, 0x14, 0x1B});
+    }
+    if (see(0x04) != OPEN) return changed;
+    line({0x07, 0x0B, 0x10, 0x16});
+    line({0x08, 0x0D, 0x13, 0x1A});
+    if (see(0x0C) != OPEN) return changed;
+    line({0x11, 0x17, 0x1C});
+    line({0x12, 0x19, 0x1F});
+    if (see(0x18) != OPEN) return changed;
+    see(0x1D);
+    see(0x1E);
     return changed;
 }
 
