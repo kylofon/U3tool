@@ -1,11 +1,8 @@
-// reader.cpp -- process lookup, memory scan and BCD decoding.
+// reader.cpp -- choosing the emulator, memory scan, BCD decoding and edits.
 #include "reader.h"
-
-#include <tlhelp32.h>
 
 #include <algorithm>
 #include <cstring>
-#include <cwctype>
 #include <map>
 
 namespace u3 {
@@ -34,7 +31,9 @@ const Code SEXES[] = {{'M', L"Male"}, {'F', L"Female"}, {'O', L"Other"}};
 const Code STATUSES[] = {{'G', L"Good"}, {'P', L"Poisoned"}, {'D', L"Dead"}, {'A', L"Ashes"}};
 
 // Character record field offsets.
-constexpr size_t O_NAME = 0x00, NAME_LEN = 15;
+constexpr size_t O_NAME = 0x00, NAME_LEN = 14;
+constexpr size_t O_MARKS = 0x0E;       // marks and cards, one flag each
+constexpr uint8_t MARK_OF_KINGS = 0x80;  // Lord British wants this past 500 max HP
 constexpr size_t O_TORCHES = 0x0F;  // Ignite takes one from here
 constexpr size_t O_INUSE = 0x10, O_STATUS = 0x11;
 constexpr size_t O_STR = 0x12, O_DEX = 0x13, O_INT = 0x14, O_WIS = 0x15;
@@ -47,6 +46,7 @@ constexpr size_t O_WEAPON_READY = 0x30, O_WEAPON_INV = 0x31;   // readied index,
 
 // Party header offsets.
 constexpr size_t H_MAP = 0x02;
+constexpr size_t H_ENTRY_X = 0x08, H_ENTRY_Y = 0x09;  // Sosaria position saved on entering somewhere
 constexpr size_t H_COUNT = 0x07;
 constexpr size_t H_SLOTS = 0x0A;
 
@@ -107,6 +107,11 @@ constexpr size_t IDLE_LOOP = sizeof IDLE_SETUP;   // the loop starts right after
 constexpr size_t IDLE_WINDOW = IDLE_LOOP + 0x40;  // its closing jump lies within this
 constexpr uint8_t OP_JNZ = 0x75, OP_JMP = 0xEB;
 
+// Offsets in EXODUS.BIN's 64K segment: the party block, and the overworld
+// idle wait (the first of the three).
+constexpr uint64_t EXODUS_PARTY_AT = 0x14BA, EXODUS_IDLE_AT = 0x1B82;
+constexpr size_t EXODUS_SEGMENT = 0x10000;
+
 // If p (IDLE_WINDOW bytes) is an idle wait, the offset of its jnz/jmp opcode; else 0.
 size_t MatchIdleLoop(const uint8_t* p) {
     for (size_t i = 0; i < IDLE_LOOP; ++i)
@@ -160,6 +165,14 @@ Character DecodeCharacter(const uint8_t* r) {
     c.hp = Bcd2(r, O_HP);
     c.maxHp = Bcd2(r, O_MAXHP);
     c.exp = Bcd2(r, O_EXP);
+
+    // Ztats shows the level as the hundreds of experience, plus one.
+    const int expHundreds = Bcd1(r[O_EXP + 1]), hpHundreds = Bcd1(r[O_MAXHP + 1]);
+    c.level = expHundreds < 0 ? -1 : std::min(expHundreds + 1, 99);
+    // Lord British adds 100 max HP while its hundreds don't exceed experience's,
+    // up to 2500, and from 500 on only for someone with the Mark of Kings.
+    c.canLevelUp = expHundreds >= 0 && hpHundreds >= 0 && hpHundreds <= expHundreds && hpHundreds < 25 &&
+                   (hpHundreds < 5 || (r[O_MARKS] & MARK_OF_KINGS)) && (r[O_STATUS] == 'G' || r[O_STATUS] == 'P');
     c.food = Bcd2(r, O_FOOD);
     c.gold = Bcd2(r, O_GOLD);
     c.gems = Bcd1(r[O_GEMS]);
@@ -197,52 +210,14 @@ constexpr char WEAPON_LIMITS[] = "QDCHQQQDDCL";
 constexpr char ARMOUR_LIMITS[] = "IECDFDCDCCH";
 constexpr int EXOTIC_WEAPON = 15, EXOTIC_ARMOUR = 7;
 
-std::vector<std::pair<DWORD, std::wstring>> FindDosBox() {
-    std::vector<std::pair<DWORD, std::wstring>> found;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return found;
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof entry;
-    for (BOOL ok = Process32FirstW(snap, &entry); ok; ok = Process32NextW(snap, &entry)) {
-        std::wstring lower = entry.szExeFile;
-        for (wchar_t& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
-        if (lower.find(L"dosbox") != std::wstring::npos) found.emplace_back(entry.th32ProcessID, entry.szExeFile);
-    }
-    CloseHandle(snap);
-    return found;
-}
-
-// Hands visit(address, bytes, count, regionSize) every committed, readable
-// region big enough to matter, in chunks that overlap so a pattern straddling
-// a chunk edge is still seen whole.
-template <typename Visit>
-void ForEachChunk(HANDLE process, Visit visit) {
-    constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
-                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    constexpr size_t CHUNK = 4 << 20;
-    constexpr size_t OVERLAP = PARTY_SIZE + RECORD_SIZE * 4;
-
-    std::vector<uint8_t> buf(CHUNK);
-    MEMORY_BASIC_INFORMATION mbi;
-    uint64_t addr = 0;
-
-    while (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof mbi)) {
-        uint64_t base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
-        uint64_t size = mbi.RegionSize;
-        if (size == 0) break;
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & READABLE) && !(mbi.Protect & PAGE_GUARD) &&
-            size >= 0x10000 && size <= (1ull << 30)) {
-            for (uint64_t pos = 0; pos < size; pos += CHUNK - OVERLAP) {
-                size_t n = static_cast<size_t>(std::min<uint64_t>(CHUNK, size - pos));
-                SIZE_T got = 0;
-                if (ReadProcessMemory(process, reinterpret_cast<LPCVOID>(base + pos), buf.data(), n, &got) &&
-                    got == n)
-                    visit(base + pos, buf.data(), n, size);
-                if (n < CHUNK) break;
-            }
-        }
-        addr = base + size;
-    }
+// What to say when an edit's write didn't go in. `partWay` if an earlier
+// write of the same edit did; `what` names what to check in game then.
+std::wstring NotWritten(WriteResult why, bool partWay, const std::wstring& what) {
+    if (why == WriteResult::Changed)
+        return partWay ? L"The game changed " + what + L" part-way through — check " + what + L" in game."
+                       : L"The game changed " + what + L" in the meantime — nothing was changed. Try again.";
+    return partWay ? L"Writing to DOSBox failed part-way — check " + what + L" in game."
+                   : L"Writing to DOSBox failed — nothing was changed.";
 }
 
 }  // namespace
@@ -324,71 +299,69 @@ std::wstring EquipProblem(const uint8_t* raw, const Equip& equip) {
     return L"";
 }
 
-DosBoxReader::~DosBoxReader() { Close(); }
+DosBoxReader::DosBoxReader(const std::wstring& stagingHost, int stagingPort)
+    : staging_(ConnectStaging(stagingHost, stagingPort)), process_(ConnectProcess()) {}
 
-void DosBoxReader::Close() {
-    if (handle_) CloseHandle(handle_);
-    handle_ = nullptr;
+void DosBoxReader::Reset() {
+    active_ = nullptr;
+    session_ = 0;
     pid = 0;
     canWrite = false;
     exe.clear();
     idleLoops_.clear();
-    lastIdleScan_ = 0;
+    idleParty_ = 0;
+    lastIdleScan_ = {};
     candidates.clear();
     index = 0;
 }
 
 uint64_t DosBoxReader::Address() const { return index < candidates.size() ? candidates[index] : 0; }
 
+uint64_t DosBoxReader::Session() const { return session_; }
+
 bool DosBoxReader::Attach() {
-    auto procs = FindDosBox();
-    if (procs.empty()) {
-        Close();
-        lastError = L"DOSBox is not running.";
+    // Prefer Staging's API whenever it answers: Staging is a "dosbox" process
+    // too, but the API is the better way in. Reading the process is the fallback.
+    Emulator* found = nullptr;
+    if (staging_->Connect())
+        found = staging_.get();
+    else if (process_ && process_->Connect())
+        found = process_.get();
+
+    if (!found) {
+        Reset();
+        if (!process_)
+            lastError = staging_->error + L" Is DOSBox Staging running with webserver_enabled = on?";
+        else if (process_->error == L"DOSBox is not running.")
+            lastError = L"DOSBox is not running (for DOSBox Staging, turn on webserver_enabled).";
+        else
+            lastError = process_->error;
         return false;
     }
-    if (handle_)
-        for (const auto& p : procs)
-            if (p.first == pid) return true;
-    Close();
-    constexpr DWORD READ_ACCESS = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ;
-    constexpr DWORD WRITE_ACCESS = READ_ACCESS | PROCESS_VM_WRITE | PROCESS_VM_OPERATION;
-    for (const auto& p : procs) {
-        // Ask for write access so the edit actions work; settle for reading.
-        HANDLE h = OpenProcess(WRITE_ACCESS, FALSE, p.first);
-        const bool writable = h != nullptr;
-        if (!h) h = OpenProcess(READ_ACCESS, FALSE, p.first);
-        if (h) {
-            handle_ = h;
-            pid = p.first;
-            exe = p.second;
-            canWrite = writable;
-            lastError.clear();
-            return true;
-        }
+    if (found != active_ || found->session != session_) {
+        Reset();
+        active_ = found;
+        session_ = found->session;
     }
-    // Found DOSBox but could not open it -- almost always elevation.
-    pid = procs[0].first;
-    exe = procs[0].second;
-    lastError = L"Cannot open " + exe + L" (pid " + std::to_wstring(pid) +
-                L") — try running this tool as administrator.";
-    return false;
+    pid = found->pid;
+    exe = found->name;
+    canWrite = found->CanWrite();
+    lastError.clear();
+    return true;
 }
 
 bool DosBoxReader::Read(uint64_t address, uint8_t* buffer, size_t size) const {
-    if (!handle_) return false;
-    SIZE_T got = 0;
-    return ReadProcessMemory(handle_, reinterpret_cast<LPCVOID>(address), buffer, size, &got) && got == size;
+    return active_ && active_->Read(address, buffer, size);
 }
 
 void DosBoxReader::Scan() {
     candidates.clear();
     index = 0;
-    if (!handle_) return;
+    if (!active_) return;
 
     std::map<uint64_t, uint64_t> found;  // party address -> size of the region holding it
     PartyBytes block;
-    ForEachChunk(handle_, [&](uint64_t at, const uint8_t* buf, size_t n, uint64_t regionSize) {
+    active_->ForEachChunk([&](uint64_t at, const uint8_t* buf, size_t n, uint64_t regionSize) {
         for (size_t i = 0; i + 0x19 <= n; ++i) {
             if (buf[i + O_INUSE] != 0xFF || !MatchesSignature(&buf[i])) continue;
             uint64_t record = at + i;
@@ -405,12 +378,25 @@ void DosBoxReader::Scan() {
         }
     });
 
-    // Prefer the biggest region: DOSBox's emulated RAM is one large
-    // allocation, while stray copies sit in small heap blocks.
-    std::vector<std::pair<uint64_t, uint64_t>> ranked(found.begin(), found.end());
-    std::stable_sort(ranked.begin(), ranked.end(),
-                     [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (const auto& r : ranked) candidates.push_back(r.first);
+    // The live party has the running game's code beside it; a stale copy of the
+    // file in one of DOSBox's buffers usually doesn't. Region size only breaks
+    // ties, since those buffers can outgrow the emulated RAM.
+    struct Ranked {
+        uint64_t address, regionSize;
+        bool beside;
+    };
+    std::vector<Ranked> ranked;
+    uint8_t window[IDLE_WINDOW];
+    for (const auto& f : found) {
+        const bool beside = f.first >= EXODUS_PARTY_AT &&
+                            Read(f.first - EXODUS_PARTY_AT + EXODUS_IDLE_AT, window, IDLE_WINDOW) &&
+                            MatchIdleLoop(window) != 0;
+        ranked.push_back({f.first, f.second, beside});
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [](const Ranked& a, const Ranked& b) {
+        return a.beside != b.beside ? a.beside : a.regionSize > b.regionSize;
+    });
+    for (const Ranked& r : ranked) candidates.push_back(r.address);
 }
 
 int DosBoxReader::CombatTurn() const {
@@ -422,6 +408,29 @@ int DosBoxReader::CombatTurn() const {
         return -1;
     return turn;
 }
+
+bool DosBoxReader::ReadLocation(const PartyBytes& raw, Location& out) const {
+    // In EXODUS.BIN's segment: party block at 14BA, then x, y, torch and dungeon
+    // level at 15CC, and the dungeon facing at 58CC.
+    constexpr uint64_t PARTY_AT = 0x14BA, POSITION_AT = 0x15CC, FACING_AT = 0x58CC;
+    if (index >= candidates.size()) return false;
+    const uint64_t party = candidates[index];
+    uint8_t position[4], facing = 0;
+    if (!Read(party + (POSITION_AT - PARTY_AT), position, sizeof position) ||
+        !Read(party + (FACING_AT - PARTY_AT), &facing, 1))
+        return false;
+    out.live = true;
+    out.map = raw[H_MAP];
+    out.entryX = raw[H_ENTRY_X];
+    out.entryY = raw[H_ENTRY_Y];
+    out.x = position[0] & 0x3F;
+    out.y = position[1] & 0x3F;
+    out.level = position[3] & 0x07;
+    out.facing = facing & 0x03;
+    return true;
+}
+
+std::wstring DosBoxReader::GameFolder() const { return active_ ? FindGameFolder(active_->pid) : L""; }
 
 void DosBoxReader::NextCandidate() {
     if (!candidates.empty()) index = (index + 1) % candidates.size();
@@ -463,15 +472,19 @@ bool DosBoxReader::BeginAction(PartyBytes& raw, ActionResult& result) const {
     return true;
 }
 
-bool DosBoxReader::Write(uint64_t address, const uint8_t* bytes, size_t size) {
-    SIZE_T written = 0;
-    return canWrite && WriteProcessMemory(handle_, reinterpret_cast<LPVOID>(address), bytes, size, &written) &&
-           written == size;
+WriteResult DosBoxReader::Write(uint64_t address, const uint8_t* bytes, size_t size, const uint8_t* expected) {
+    return active_ && canWrite ? active_->Write(address, bytes, size, expected) : WriteResult::Failed;
 }
 
-bool DosBoxReader::WriteBcd2(int member, size_t offset, int value) {
+WriteResult DosBoxReader::WriteField(const PartyBytes& raw, int member, size_t offset, const uint8_t* bytes,
+                                     size_t size) {
+    const size_t at = HEADER_SIZE + member * RECORD_SIZE + offset;
+    return Write(candidates[index] + at, bytes, size, raw.data() + at);
+}
+
+WriteResult DosBoxReader::WriteBcd2(const PartyBytes& raw, int member, size_t offset, int value) {
     const uint8_t bytes[2] = {ToBcd(value % 100), ToBcd(value / 100 % 100)};
-    return Write(candidates[index] + HEADER_SIZE + member * RECORD_SIZE + offset, bytes, sizeof bytes);
+    return WriteField(raw, member, offset, bytes, sizeof bytes);
 }
 
 ActionResult DosBoxReader::DistributeFood() {
@@ -492,12 +505,16 @@ ActionResult DosBoxReader::DistributeFood() {
 
     // An even split, with any remainder going one apiece to the first members.
     const int share = total / count, extra = total % count;
+    bool partWay = false;
     for (int i = 0; i < count; ++i) {
         const int value = share + (i < extra ? 1 : 0);
-        if (value != food[i] && !WriteBcd2(i, O_FOOD, value)) {
-            result.message = L"Writing to DOSBox failed part-way — check food in game.";
+        if (value == food[i]) continue;
+        const WriteResult written = WriteBcd2(raw, i, O_FOOD, value);
+        if (written != WriteResult::Ok) {
+            result.message = NotWritten(written, partWay, L"food");
             return result;
         }
+        partWay = true;
     }
 
     result.ok = true;
@@ -539,15 +556,16 @@ ActionResult DosBoxReader::PoolGold(int target) {
 
     // Credit the recipient first: if a later write fails, gold is duplicated
     // rather than lost.
-    if (gold[target] != before[target] && !WriteBcd2(target, O_GOLD, gold[target])) {
-        result.message = L"Writing to DOSBox failed — nothing was changed.";
-        return result;
-    }
-    for (int i = 0; i < count; ++i) {
-        if (i != target && gold[i] != before[i] && !WriteBcd2(i, O_GOLD, gold[i])) {
-            result.message = L"Writing to DOSBox failed part-way — check gold in game.";
+    bool partWay = false;
+    for (int step = 0; step <= count; ++step) {
+        const int i = step == 0 ? target : step - 1;
+        if ((step > 0 && i == target) || gold[i] == before[i]) continue;
+        const WriteResult written = WriteBcd2(raw, i, O_GOLD, gold[i]);
+        if (written != WriteResult::Ok) {
+            result.message = NotWritten(written, partWay, L"gold");
             return result;
         }
+        partWay = true;
     }
 
     int leftOver = 0;
@@ -586,9 +604,11 @@ ActionResult DosBoxReader::Revive(int member) {
 
     // Hit points first, so nobody is ever alive with none.
     const uint8_t good = 'G';
-    if (!WriteBcd2(member, O_HP, maxHp) ||
-        !Write(candidates[index] + HEADER_SIZE + member * RECORD_SIZE + O_STATUS, &good, 1)) {
-        result.message = L"Writing to DOSBox failed — check " + name + L" in game.";
+    WriteResult written = WriteBcd2(raw, member, O_HP, maxHp);
+    const bool partWay = written == WriteResult::Ok;
+    if (partWay) written = WriteField(raw, member, O_STATUS, &good, 1);
+    if (written != WriteResult::Ok) {
+        result.message = NotWritten(written, partWay, name);
         return result;
     }
     result.ok = true;
@@ -617,15 +637,15 @@ ActionResult DosBoxReader::FullHealth(int member) {
         return result;
     }
 
-    result.ok = true;
     if (hp >= maxHp) {
+        result.ok = true;
         result.message = name + L" already has full health.";
-    } else if (WriteBcd2(member, O_HP, maxHp)) {
-        result.message = name + L" is back to full health (" + std::to_wstring(maxHp) + L" HP).";
-    } else {
-        result.ok = false;
-        result.message = L"Writing to DOSBox failed — nothing was changed.";
+        return result;
     }
+    const WriteResult written = WriteBcd2(raw, member, O_HP, maxHp);
+    result.ok = written == WriteResult::Ok;
+    result.message = result.ok ? name + L" is back to full health (" + std::to_wstring(maxHp) + L" HP)."
+                               : NotWritten(written, false, name + L"'s hit points");
     return result;
 }
 
@@ -645,8 +665,9 @@ ActionResult DosBoxReader::Cure(int member) {
         return result;
     }
     const uint8_t good = 'G';
-    if (!Write(candidates[index] + HEADER_SIZE + member * RECORD_SIZE + O_STATUS, &good, 1)) {
-        result.message = L"Writing to DOSBox failed — nothing was changed.";
+    const WriteResult written = WriteField(raw, member, O_STATUS, &good, 1);
+    if (written != WriteResult::Ok) {
+        result.message = NotWritten(written, false, name);
         return result;
     }
     result.ok = true;
@@ -669,16 +690,14 @@ ActionResult DosBoxReader::MoveItems(const ItemMove& move) {
     const size_t at = InventoryOffset(move.armour, move.type);
     const uint8_t given = ToBcd(Bcd1(Record(raw, move.to)[at]) + move.count);
     const uint8_t kept = ToBcd(Bcd1(Record(raw, move.from)[at]) - move.count);
-    const uint64_t party = candidates[index];
 
     // Credit the recipient first: if the second write fails, items are
     // duplicated rather than lost.
-    if (!Write(party + HEADER_SIZE + move.to * RECORD_SIZE + at, &given, 1)) {
-        result.message = L"Writing to DOSBox failed — nothing was changed.";
-        return result;
-    }
-    if (!Write(party + HEADER_SIZE + move.from * RECORD_SIZE + at, &kept, 1)) {
-        result.message = L"Writing to DOSBox failed part-way — check the inventories in game.";
+    WriteResult written = WriteField(raw, move.to, at, &given, 1);
+    const bool partWay = written == WriteResult::Ok;
+    if (partWay) written = WriteField(raw, move.from, at, &kept, 1);
+    if (written != WriteResult::Ok) {
+        result.message = NotWritten(written, partWay, L"the inventories");
         return result;
     }
 
@@ -733,8 +752,9 @@ ActionResult DosBoxReader::SetEquipped(const Equip& equip) {
     // Like the game, store the type index; the item stays in the inventory count.
     const uint8_t type = static_cast<uint8_t>(equip.type);
     const size_t field = equip.armour ? O_ARMOUR_WORN : O_WEAPON_READY;
-    if (!Write(candidates[index] + HEADER_SIZE + equip.member * RECORD_SIZE + field, &type, 1)) {
-        result.message = L"Writing to DOSBox failed — nothing was changed.";
+    const WriteResult written = WriteField(raw, equip.member, field, &type, 1);
+    if (written != WriteResult::Ok) {
+        result.message = NotWritten(written, false, L"the equipment");
         return result;
     }
 
@@ -750,28 +770,32 @@ ActionResult DosBoxReader::SetEquipped(const Equip& equip) {
 
 void DosBoxReader::ScanIdleLoops() {
     idleLoops_.clear();
-    if (!handle_) return;
+    idleParty_ = 0;
+    if (!active_ || index >= candidates.size() || candidates[index] < EXODUS_PARTY_AT) return;
 
-    // Like the party, the live code sits in DOSBox's big emulated-RAM
-    // allocation; keep only loops from the largest region to skip stray
-    // copies of EXODUS.BIN in file buffers.
-    std::map<uint64_t, std::pair<uint64_t, IdleLoop>> found;  // address -> (region size, loop)
-    ForEachChunk(handle_, [&](uint64_t at, const uint8_t* buf, size_t n, uint64_t regionSize) {
-        for (size_t i = 0; i + IDLE_WINDOW <= n; ++i) {
-            if (buf[i] != IDLE_SETUP[0] || buf[i + 1] != IDLE_SETUP[1]) continue;
-            if (size_t jumpAt = MatchIdleLoop(&buf[i])) found[at + i] = {regionSize, IdleLoop{at + i, jumpAt}};
-        }
-    });
-
-    uint64_t biggest = 0;
-    for (const auto& f : found) biggest = std::max(biggest, f.second.first);
-    for (const auto& f : found)
-        if (f.second.first == biggest) idleLoops_.push_back(f.second.second);
+    // The loops that run are in the same copy of EXODUS.BIN as the live party:
+    // the 64K segment around it. DOSBox can hold stale copies of the file in
+    // buffers, even bigger ones than its emulated RAM, so look nowhere else.
+    const uint64_t segment = candidates[index] - EXODUS_PARTY_AT;
+    std::vector<uint8_t> code(EXODUS_SEGMENT);
+    if (!Read(segment, code.data(), code.size())) return;
+    for (size_t i = 0; i + IDLE_WINDOW <= code.size(); ++i) {
+        if (code[i] != IDLE_SETUP[0] || code[i + 1] != IDLE_SETUP[1]) continue;
+        if (size_t jumpAt = MatchIdleLoop(&code[i])) idleLoops_.push_back({segment + i, jumpAt});
+    }
+    idleParty_ = candidates[index];
 }
 
 SpeedState DosBoxReader::SyncSpeed(const GameSpeed& want, bool allowScan) {
     SpeedState state;
-    if (!handle_) return state;
+    if (!active_) return state;
+
+    // The loops belong to the live party's copy of the game; if the party is
+    // now read from elsewhere, find them again.
+    if (!idleLoops_.empty() && (index >= candidates.size() || candidates[index] != idleParty_)) {
+        idleLoops_.clear();
+        lastIdleScan_ = {};
+    }
 
     // The game reloads EXODUS.BIN on Alt-R, a new journey and so on, so make
     // sure the loops are still where we found them.
@@ -779,13 +803,13 @@ SpeedState DosBoxReader::SyncSpeed(const GameSpeed& want, bool allowScan) {
     for (const IdleLoop& loop : idleLoops_) {
         if (!Read(loop.address, window, IDLE_WINDOW) || MatchIdleLoop(window) != loop.jumpAt) {
             idleLoops_.clear();
-            lastIdleScan_ = 0;  // they moved: look again straight away
+            lastIdleScan_ = {};  // they moved: look again straight away
             break;
         }
     }
     if (idleLoops_.empty()) {
-        const ULONGLONG now = GetTickCount64();
-        if (!allowScan || now - lastIdleScan_ < 3000) return state;
+        const auto now = std::chrono::steady_clock::now();
+        if (!allowScan || now - lastIdleScan_ < std::chrono::seconds(3)) return state;
         lastIdleScan_ = now;
         ScanIdleLoops();
         if (idleLoops_.empty()) return state;
@@ -797,8 +821,10 @@ SpeedState DosBoxReader::SyncSpeed(const GameSpeed& want, bool allowScan) {
     state.applied = true;
     for (const IdleLoop& loop : idleLoops_) {
         const bool ok = Read(loop.address, window, IDLE_WINDOW) &&
-                        (window[IDLE_SECONDS] == seconds || Write(loop.address + IDLE_SECONDS, &seconds, 1)) &&
-                        (window[loop.jumpAt] == jump || Write(loop.address + loop.jumpAt, &jump, 1));
+                        (window[IDLE_SECONDS] == seconds ||
+                         Write(loop.address + IDLE_SECONDS, &seconds, 1, &window[IDLE_SECONDS]) == WriteResult::Ok) &&
+                        (window[loop.jumpAt] == jump ||
+                         Write(loop.address + loop.jumpAt, &jump, 1, &window[loop.jumpAt]) == WriteResult::Ok);
         if (!ok) state.applied = false;
     }
 

@@ -5,25 +5,16 @@
 
 #include <string>
 
+#include "refdata.h"
+
 namespace u3ref {
 
-enum Kind { WEAPONS, ARMOUR, SPELLS, KIND_COUNT };
-
-struct Caster {
-    std::wstring name;
-    wchar_t classCode = 0;  // F, C, W, T, P, B, L, I, D, A or R
-    bool alive = false;     // Good or Poisoned
-    int mp = 0;
-};
-
-// What the Spells window's "Castable only" filter goes by.
-struct PartyState {
-    bool live = false;
-    int map = 0;          // 0x00 overworld, 0x01 dungeon, 0x80 combat, others for towns and castles
-    int combatTurn = -1;  // in combat, whose turn it is
-    int count = 0;
-    Caster members[4];
-};
+using u3::ref::ARMOUR;
+using u3::ref::Kind;
+using u3::ref::KIND_COUNT;
+using u3::ref::PartyState;
+using u3::ref::SPELLS;
+using u3::ref::WEAPONS;
 
 // Registers the reference window class; call once at startup.
 void Register(HINSTANCE inst, HICON icon, HICON smallIcon);

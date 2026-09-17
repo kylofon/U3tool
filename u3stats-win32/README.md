@@ -7,15 +7,23 @@ check boxes, themed through Common Controls v6. No runtime or DLLs beyond
 what ships with Windows.
 
 Run `U3Stats.exe`. It attaches to DOSBox by itself and keeps retrying, so start
-order doesn't matter. The title bar says **(Connected)** once a party is live and
-**(Not connected)** otherwise, with the reason in the status bar.
+order doesn't matter (see [Connecting to the game](#connecting-to-the-game)). The title bar says **(Connected)** once a party is live and
+**(Not connected)** otherwise, with the reason in the status bar. While not
+connected the window shows only "Waiting for connection, is the game running?".
 
-Each party member's box shows the name with the condition (Good, Poisoned,
-Dead, Ashes) to its right, race, class and sex, hit and magic points,
+Each party member's box is captioned with class, sex and level, and shows the
+name with the condition (Good, Poisoned, Dead, Ashes) to its right, race, hit and magic points,
 attributes, experience, food, gold, a scrolling **Carrying** list (which marks
 the readied weapon and worn armour)
 and the gem/key/powder/torch counters. The status bar shows the latest message
 on the left and the game speed on the right.
+
+The level is worked out the way the game's Ztats screen does it: the hundreds of
+experience, plus one. When visiting Lord British would raise a character's
+maximum hit points by 100, their experience turns green with a **▲** in front
+(hover for a tooltip). The game grants that while the hundreds of max HP don't
+exceed the hundreds of experience, up to 2500 max HP, and from 500 max HP only
+to someone with the Mark of Kings.
 
 ## Menus
 
@@ -25,11 +33,19 @@ The main window's position and size, which reference windows are open and
 where, and Always on top are remembered between runs in
 `%APPDATA%\Ultima III Assistant\settings.ini`. Delete that file to go back to
 the defaults. A saved position that no monitor covers any more is ignored.
+A window counts as open as soon as it opens, so this survives Windows shutting
+down or the app being ended. A window closed less than two seconds before the
+app quits (as the taskbar's **Close all windows** does) still counts as open.
+
+If the app crashes, the exception and a stack trace are appended to
+`%APPDATA%\Ultima III Assistant\crashes\crash.log`, with a minidump
+(`crash-<date>-<time>.dmp`) beside it. Addresses read `U3Stats.exe+0x…`: add
+0x140000000 and look the result up in `U3Stats.map`, which `build.cmd` writes.
 
 * **File → Quit**
-* **Debug** — its first, greyed line shows the DOSBox process and the party
-  block's address.
-* **Debug → Rescan memory** — force a fresh search of DOSBox memory.
+* **Debug** — its first, greyed line shows the emulator (DOSBox Staging's API
+  or the DOSBox process) and the party block's address.
+* **Debug → Rescan memory** — force a fresh search of the emulated memory.
 * **Debug → Next source** — cycle between copies of the party block when more
   than one is found (the item then reads "Next source (*n* of *m*)"); greyed
   out otherwise.
@@ -50,7 +66,9 @@ the defaults. A saved position that no monitor covers any more is ignored.
   out for everyone else).
 
 These actions write straight into DOSBox's memory: they re-read the live party
-first and change only the fields they need. The result appears in
+first and change only the fields they need, and only if those fields still hold
+what was just read. If the game changed one in between (say, food eaten while
+travelling), nothing is written and the status bar asks you to try again. The result appears in
 the status bar at the bottom; failures also pop up a message box. They're
 greyed out unless a party of two or more is live. Changes stick once the game
 saves, like anything else that happens in play.
@@ -134,7 +152,8 @@ How it works: `EXODUS.BIN` has three copies of the same idle-wait loop
 seconds + 5" and passes a turn when the clock reaches it. The assistant finds them by
 signature, rewrites the `5`, and for Pause turns the loop's `jnz` into a `jmp`.
 This needs DOSBox's `simple` or `normal` CPU core (the GOG config uses
-`simple`). The `dynamic` core caches translated code, so it may miss the change.
+`simple`; `staging/assistant.conf` picks `normal`). The `dynamic` core caches
+translated code, so it may miss the change.
 
 ## Reference windows
 
@@ -157,6 +176,10 @@ the **Always on top** preference.
   checkbox says whose spells are shown. With no party connected, every spell
   is shown.
 
+Hover over the **Classes** column header for what the class letters stand for.
+Hover over a row to see which party members can ready, wear or cast it; for
+spells, anyone not alive or short of MP right now is marked.
+
 The **Key** column is the letter to press in the game: for Ready (weapons), Wear
 (armour), or Cast (spells, e.g. Mittar is B, Sanctu is C). The data comes from
 the [Gamer Corner Ultima III guide](https://guides.gamercorner.net/ultimaiii/).
@@ -164,21 +187,95 @@ Its class columns agree with the limits in `EXODUS.BIN` that the assistant
 enforces when equipping. The guide gives no damage or protection numbers, so
 none are shown.
 
+## Maps
+
+**Reference → Maps → World** and **Dungeons** open map windows drawn from the
+game's own files, found through the running DOSBox's folder (or the config
+files on its command line) and remembered for later. Failing that, the last
+folder found is used, or the GOG default. Like the reference windows, they're resizable, remember where they
+were, and follow Always on top. Each opens on the map the party is on when that
+can be told. It switches when the party enters another place or dungeon level,
+but leaves alone a map you picked while the party stays put.
+
+* **World**: Sosaria, Ambrosia, and every town and castle, chosen from the
+  **Map** list and drawn with the game's tiles. A blinking yellow box marks the
+  party. Sosaria and Ambrosia come from the game's saved copies, so they
+  include its changes.
+* **Dungeons**: pick a **Dungeon** and **Level**. Walls, doors and secret doors
+  are drawn, with symbols for ladders, chests, fountains, traps, strange winds,
+  red-hot rods (marks), gremlins, misty writing and the Time Lord (see the
+  legend). A blinking red arrow marks the party and points the way it faces.
+  * Without **Reveal**, only explored cells are shown. Walking around a dungeon
+    while this window is open explores the cells around the party, and what's
+    explored is kept per dungeon and level between runs.
+  * **Reveal** shows the whole level.
+  * **Clear** forgets what's been explored in the chosen dungeon, after asking.
+
+Dungeon maps show the levels as they start. Chests taken or traps sprung during
+play still appear.
+
+The location comes from the game: the map type in the party header, the Sosaria
+position saved when entering a town, castle or dungeon (matched against
+`EXODUS.BIN`'s own table of entrances), and the position, dungeon level and
+facing just past the party block. Dungeon cell meanings come from
+`EXODUS.BIN`'s handlers: `80` wall, `C0` door, `A0` secret door, `10`/`20`/`30`
+ladders, `40` chest, `01` Time Lord, `02` fountain, `03` strange wind, `04`
+trap, `05` red-hot rod, `06` gremlins, `08` misty writing.
+
+## Connecting to the game
+
+The assistant can reach the game in two ways, and tries them in this order:
+
+1. **DOSBox Staging's HTTP API** (recommended). DOSBox Staging 0.83 and later
+   can serve a documented, versioned REST API
+   ([manual](https://www.dosbox-staging.org/0.83/manual/http-api/)) for reading
+   and writing emulated memory. It works without administrator rights, and
+   each edit is checked and written between two emulated instructions, so it
+   can't collide with the game. Turn it on with `webserver_enabled = on` in
+   the `[webserver]` section. The assistant looks for it on `127.0.0.1:8086`;
+   to change that, add to `settings.ini`:
+
+   ```ini
+   [Staging]
+   Host=127.0.0.1
+   Port=8086
+   ```
+
+   `..\staging\Play in DOSBox Staging.cmd` starts the GOG game in Staging with
+   the GOG config files unchanged, plus `..\staging\assistant.conf`, which turns
+   the API on. It looks for Staging in its default install folders; otherwise
+   pass the game folder and Staging's `dosbox.exe` as arguments.
+
+2. **DOSBox's process memory**, for the DOSBox 0.74 that GOG ships, or a
+   Staging with the API off. It reads and writes any process with "dosbox" in
+   its name directly, as described below. Windows only.
+
+Whenever the API answers it's used, even if the assistant had fallen back to
+reading the process.
+
 ## How it works
 
 Ultima III keeps the party in RAM in exactly the layout it writes to
-`PARTY.ULT`, so the reader sweeps DOSBox's committed memory for a byte pattern
+`PARTY.ULT`, so the reader searches memory for a byte pattern
 that can only be a character record — a printable name, the `0xFF` in-use
 marker, a status letter, four BCD attribute bytes, then valid race/class/sex
 letters — then checks the 18-byte header in front of it. The address is cached
 and re-validated on each 250 ms poll; if it ever stops looking like a party,
-the tool rescans by itself. Copies inside DOSBox's big emulated-RAM allocation
-rank first, since that is the live one; a stale copy in a file buffer would be
-the other source.
+the tool rescans by itself. Through Staging's API the search covers the
+emulated PC's first megabyte, where DOS programs like the game live, in one
+request. Reading the DOSBox process instead means sweeping all its committed
+memory, and DOSBox can also hold stale copies of the game's
+files in its buffers, sometimes in regions bigger than its emulated RAM. So a
+copy counts as live when the running game's code sits beside it, at the offset
+`EXODUS.BIN` uses, and region size only breaks ties. The game-speed patch
+likewise looks only in the 64K code segment around the live party, never in
+those stale copies.
 
-Reading takes `PROCESS_VM_READ` on DOSBox, and the edit actions also need
-`PROCESS_VM_WRITE`. Same-user processes are fine; if you launch the game
-elevated you'd need to launch this elevated too, and the status bar will say so.
+Reading the process takes `PROCESS_VM_READ` on DOSBox, and the edit actions
+also need `PROCESS_VM_WRITE`. Same-user processes are fine; if you launch the
+game elevated you'd need to launch this elevated too, and the status bar will
+say so. There the check that a field is unchanged happens just before the
+write, not atomically as with the API. The API needs none of this.
 
 ## Data layout
 
@@ -200,7 +297,8 @@ raw pane but not decoded.
 
 | Offset | Size | Field |
 |---|---|---|
-| `0x00` | 15 | name, NUL padded |
+| `0x00` | 14 | name, NUL padded |
+| `0x0E` | 1 | marks and cards, one flag each (`0x80` = Mark of Kings) |
 | `0x0F` | 1 | torches |
 | `0x10` | 1 | `0xFF` = slot in use |
 | `0x11` | 1 | status — `G`ood, `P`oisoned, `D`ead, `A`shes |
@@ -240,21 +338,41 @@ Several fields are confirmed from the game's own code in `EXODUS.BIN`:
 Gems at `0x25` and keys at `0x26` are still inferred from their position. Buy
 one of each in a guild and compare against the in-game Ztats screen to confirm;
 if a label is off, swap the `O_GEMS` and `O_KEYS` constants at the top of
-`reader.cpp`.
+`core/reader.cpp`.
 
 ## Building
 
 Needs MinGW-w64 (MSYS2 `mingw64`). Run `build.cmd`; it produces a statically
-linked `U3Stats.exe`.
+linked `U3Stats.exe` from this folder and `../core`. The Windows libraries it
+links ship with Windows; cpp-httplib is a header in `../core/third_party`.
 
 ## Files
 
-* `reader.h`, `reader.cpp` — process lookup, memory scan, BCD decoding, and
-  the edit and game-speed patches. The field layout is documented above.
+The window code is here; everything that isn't UI is in [`../core`](../core)
+and builds on Windows and Linux alike (`core/CMakeLists.txt`):
+
+* `core/reader.h`, `reader.cpp` — choosing the emulator, memory scan, BCD
+  decoding, and the edit and game-speed patches. The field layout is
+  documented above.
+* `core/emulator.h` — the interface both ways in share.
+* `core/staging.cpp` — the DOSBox Staging HTTP API client (cpp-httplib).
+* `core/platform_win32.cpp` — direct DOSBox process memory access, and finding
+  the game's folder from a process.
+* `core/platform_posix.cpp` — the same folder lookup on Linux, through `/proc`.
+  There's no process memory access there.
+* `core/mapdata.h`, `mapdata.cpp` — the map tables, reading map files, world
+  map pixels, dungeon cell symbols and explored-cell bookkeeping.
+* `core/refdata.h`, `refdata.cpp` — the Weapons, Armour and Spells tables, and
+  who in the party can use each row.
+
+
+And in this folder:
+
 * `main.cpp` — window, layout, rendering, polling thread.
 * `reference.h`, `reference.cpp` — the Weapons, Armour and Spells reference
-  windows and their data.
-* `settings.h`, `settings.cpp` — window placement and preferences saved between
-  runs.
+  windows.
+* `maps.h`, `maps.cpp` — the World and Dungeons map windows.
+* `settings.h`, `settings.cpp` — window placement, preferences and explored
+  dungeon cells saved between runs.
 * `app.rc`, `app.manifest`, `app.ico` — icon, visual styles, DPI awareness,
   version info.

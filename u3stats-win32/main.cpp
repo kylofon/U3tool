@@ -1,6 +1,7 @@
 // main.cpp -- Ultima III Assistant: a native Win32 live party viewer and editor.
 //
-// A worker thread polls DOSBox through u3::DosBoxReader and posts snapshots
+// A worker thread polls DOSBox (Staging's HTTP API, or the process's memory)
+// through u3::DosBoxReader and posts snapshots
 // to the window; the UI thread decodes them and updates standard controls,
 // touching only what actually changed so nothing flickers.
 #include <windows.h>
@@ -14,6 +15,8 @@
 #include <vector>
 
 #include "reader.h"
+#include "crash.h"
+#include "maps.h"
 #include "reference.h"
 #include "settings.h"
 
@@ -44,6 +47,7 @@ enum : int {
     IDM_REVIVE_BASE = 240,     // IDM_REVIVE_BASE + party member
     IDM_HEAL_BASE = 250,       // IDM_HEAL_BASE + party member
     IDM_CURE_BASE = 260,       // IDM_CURE_BASE + party member
+    IDM_MAPS_BASE = 270,       // IDM_MAPS_BASE + u3maps::Kind
 };
 
 // Requests handed to the worker thread; pooling, reviving, healing and curing
@@ -106,6 +110,9 @@ struct Snapshot {
     size_t candidates = 0, index = 0;
     u3::SpeedState speed;
     int combatTurn = -1;
+    bool hasLocation = false;
+    u3::Location location;
+    std::wstring gameFolder;
 };
 
 struct CharCtl {
@@ -117,12 +124,15 @@ struct CharCtl {
     COLORREF statusColor = COL_GOOD;
     bool empty = true;
     int barMax = -1, barPos = -1, barState = -1;
+    bool levelUp = false;             // Lord British would raise max HP
     std::vector<std::wstring> carried;
     std::vector<u3::CarriedItem> items;  // what each line of carryList holds
 };
 
 HINSTANCE g_inst;
 HWND g_hwnd, g_rawEdit, g_statusBar;
+HWND g_waitLabel;          // shown in place of the party while not connected
+bool g_partyShown = true;  // whether the party columns are visible
 HMENU g_actionsMenu, g_poolMenu, g_speedMenu, g_debugMenu, g_cheatMenu, g_reviveMenu, g_healMenu, g_cureMenu;
 CharCtl g_chars[4];
 HFONT g_font, g_fontBold, g_fontName, g_fontMono;
@@ -237,13 +247,13 @@ HWND Label(const wchar_t* text, HFONT font, DWORD type = SS_LEFTNOWORDWRAP) {
 void CreateControls() {
     for (int i = 0; i < 4; ++i) {
         CharCtl& c = g_chars[i];
-        c.name = Label(L"— empty —", g_fontName, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
+        c.name = Label(L"", g_fontName, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
         c.kind = Label(L"", g_font, SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS);
         c.status = Label(L"", g_font, SS_RIGHT);
         c.hpBar = Child(PROGRESS_CLASSW, L"", 0, g_font);
         for (int r = 0; r < ROW_COUNT; ++r) {
             c.rowLbl[r] = Label(ROW_LABELS[r], g_font);
-            c.rowVal[r] = Label(L"", g_fontBold, SS_RIGHT);
+            c.rowVal[r] = Label(L"", g_fontBold, SS_RIGHT | (r == ROW_EXP ? SS_NOTIFY : 0));  // notify: for its tooltip
         }
         for (int k = 0; k < 4; ++k) {
             c.statLbl[k] = Label(STAT_LABELS[k], g_font);
@@ -260,9 +270,22 @@ void CreateControls() {
 
         // The group box goes to the bottom of the z-order and clips its
         // siblings, so it never paints over the controls it frames.
-        c.group = Child(L"BUTTON", Format(L"Party member %d", i + 1).c_str(), BS_GROUPBOX | WS_CLIPSIBLINGS,
-                        g_font);
+        c.group = Child(L"BUTTON", L"", BS_GROUPBOX | WS_CLIPSIBLINGS, g_font);
         SetWindowPos(c.group, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    // Explains the ▲ that marks someone Lord British will raise.
+    HWND tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP, 0, 0, 0, 0, g_hwnd,
+                               nullptr, g_inst, nullptr);
+    for (CharCtl& c : g_chars) {
+        TOOLINFOW tool{};
+        tool.cbSize = sizeof tool;
+        tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        tool.hwnd = g_hwnd;
+        tool.uId = reinterpret_cast<UINT_PTR>(c.rowVal[ROW_EXP]);
+        tool.lpszText = const_cast<LPWSTR>(L"▲ Lord British will raise this character's maximum hit points by 100 — "
+                                           L"visit him.");
+        SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
     }
 
     g_rawEdit = Child(L"EDIT", L"",
@@ -270,8 +293,33 @@ void CreateControls() {
                       g_fontMono, IDC_RAWEDIT, WS_EX_CLIENTEDGE);
     ShowWindow(g_rawEdit, SW_HIDE);
 
+    g_waitLabel = Label(L"Waiting for connection, is the game running?", g_fontName, SS_CENTER | SS_CENTERIMAGE);
+
     g_statusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0,
                                   g_hwnd, nullptr, g_inst, nullptr);
+}
+
+// Shows the party columns while connected; otherwise only the waiting message.
+void ShowParty(bool show) {
+    if (show == g_partyShown) return;
+    g_partyShown = show;
+    const int cmd = show ? SW_SHOW : SW_HIDE;
+    for (CharCtl& c : g_chars) {
+        for (HWND h : {c.group, c.name, c.kind, c.status, c.hpBar, c.carryLbl, c.carryList}) ShowWindow(h, cmd);
+        for (int r = 0; r < ROW_COUNT; ++r) {
+            ShowWindow(c.rowLbl[r], cmd);
+            ShowWindow(c.rowVal[r], cmd);
+        }
+        for (int k = 0; k < 4; ++k) {
+            ShowWindow(c.statLbl[k], cmd);
+            ShowWindow(c.statVal[k], cmd);
+            ShowWindow(c.cntLbl[k], cmd);
+            ShowWindow(c.cntVal[k], cmd);
+        }
+        for (HWND h : c.sep) ShowWindow(h, cmd);
+    }
+    ShowWindow(g_rawEdit, show && g_showRaw ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_waitLabel, show ? SW_HIDE : SW_SHOW);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +360,7 @@ int LayoutChar(CharCtl& c, int gx, int gy, int gw) {
         y += 2 * L;
     };
 
-    // The condition sits at the right end of the name row, in the regular font.
+    // The name, and the condition at the right end.
     const int statusW = S(76);
     MoveWindow(c.name, x, y, w - statusW, g_nameH, FALSE);
     MoveWindow(c.status, x + w - statusW, y + g_nameH - L, statusW, L, FALSE);
@@ -363,6 +411,7 @@ void Layout() {
     // The raw pane takes whatever is left below the columns.
     const int rawY = m + g_columnH + gap;
     if (g_showRaw) MoveWindow(g_rawEdit, m, rawY, W - 2 * m, std::max(H - m - rawY, S(60)), FALSE);
+    MoveWindow(g_waitLabel, 0, 0, W, H, FALSE);
 
     RedrawWindow(g_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
@@ -427,8 +476,12 @@ void SetEmptyFlag(CharCtl& c, bool empty) {
 
 void ShowEmpty(CharCtl& c, int slot) {
     SetEmptyFlag(c, true);
-    SetText(c.group, Format(L"Party member %d", slot + 1));
+    SetText(c.group, L"");
     SetText(c.name, L"— empty —");
+    if (c.levelUp) {
+        c.levelUp = false;
+        InvalidateRect(c.rowVal[ROW_EXP], nullptr, TRUE);
+    }
     SetText(c.kind, L"");
     SetText(c.status, L"");
     SetBar(c, 1, 0, PBST_NORMAL);
@@ -438,6 +491,8 @@ void ShowEmpty(CharCtl& c, int slot) {
     c.items.clear();
     SetCarried(c, {});
 }
+
+std::wstring MenuEscape(const std::wstring& s);
 
 COLORREF StatusColour(char code) {
     switch (code) {
@@ -450,9 +505,12 @@ COLORREF StatusColour(char code) {
 
 void Fill(CharCtl& c, const u3::Character& ch, int slot) {
     SetEmptyFlag(c, false);
-    SetText(c.group, Format(L"Party member %d", slot + 1));
+    // The group box caption carries class, gender and level; group boxes treat '&' as a mnemonic.
+    std::wstring caption = ch.klass + L"  ·  " + ch.sex;
+    if (ch.level > 0) caption += Format(L"  ·  Level %d", ch.level);
+    SetText(c.group, MenuEscape(caption));
     SetText(c.name, ch.name.empty() ? L"(unnamed)" : ch.name);
-    SetText(c.kind, ch.race + L" " + ch.klass + L"  ·  " + ch.sex);
+    SetText(c.kind, ch.race);
     SetText(c.status, ch.status);
     COLORREF colour = StatusColour(ch.statusCode);
     if (colour != c.statusColor) {
@@ -471,7 +529,11 @@ void Fill(CharCtl& c, const u3::Character& ch, int slot) {
     }
 
     SetText(c.rowVal[ROW_MP], Num(ch.mp));
-    SetText(c.rowVal[ROW_EXP], Num(ch.exp));
+    SetText(c.rowVal[ROW_EXP], ch.canLevelUp ? L"▲ " + Num(ch.exp) : Num(ch.exp));
+    if (ch.canLevelUp != c.levelUp) {
+        c.levelUp = ch.canLevelUp;
+        InvalidateRect(c.rowVal[ROW_EXP], nullptr, TRUE);
+    }
     SetText(c.rowVal[ROW_FOOD], Num(ch.food));
     SetText(c.rowVal[ROW_GOLD], Num(ch.gold));
 
@@ -546,24 +608,19 @@ void RenderSpeed(const Snapshot& s) {
     SetStatusPart(1, L"\t\t" + text);  // two tabs right-align it
 }
 
+// Tells the map windows where the party is.
+void UpdateMaps(const Snapshot& s) {
+    u3maps::UpdateLocation(s.ok && s.hasLocation ? s.location : u3::Location{}, s.gameFolder);
+}
+
 // Hands the reference windows what the Spells "Castable only" filter needs.
 void UpdateReferences(const Snapshot& s, const u3::Party* party) {
-    u3ref::PartyState state;
-    if (party) {
-        state.live = true;
-        state.map = party->map;
-        state.combatTurn = s.combatTurn;
-        state.count = std::min(party->count, 4);
-        for (int i = 0; i < state.count; ++i) {
-            const u3::Character& ch = party->chars[i];
-            u3ref::Caster& caster = state.members[i];
-            caster.name = ch.name;
-            caster.classCode = static_cast<wchar_t>(static_cast<unsigned char>(ch.classCode));
-            caster.alive = ch.present && (ch.statusCode == 'G' || ch.statusCode == 'P');
-            caster.mp = ch.mp;
-        }
-    }
-    u3ref::UpdateParty(state);
+    u3ref::UpdateParty(u3::ref::PartyStateOf(party, s.combatTurn));
+}
+
+// The emulator, for the Debug menu.
+std::wstring SourceName(const Snapshot& s) {
+    return s.pid ? Format(L"%ls (pid %lu)", s.exe.c_str(), static_cast<unsigned long>(s.pid)) : s.exe;
 }
 
 void Render(const Snapshot& s) {
@@ -571,10 +628,11 @@ void Render(const Snapshot& s) {
     g_sourceCount = s.ok ? s.candidates : 0;
     g_sourceIndex = s.index;
     SetText(g_hwnd, std::wstring(APP_TITLE) + (s.ok ? L" (Connected)" : L" (Not connected)"));
+    ShowParty(s.ok);
     RenderSpeed(s);
+    UpdateMaps(s);
     if (!s.ok) {
-        g_debugInfo = s.pid ? Format(L"%ls (pid %lu), no party found", s.exe.c_str(), static_cast<unsigned long>(s.pid))
-                            : std::wstring(L"Not connected");
+        g_debugInfo = s.exe.empty() ? std::wstring(L"Not connected") : SourceName(s) + L", no party found";
         // Say why once, rather than overwriting later messages on every poll.
         const std::wstring problem = s.error.empty() ? L"Waiting for a party in memory…" : s.error;
         if (problem != g_problem) SetStatusPart(0, g_problem = problem);
@@ -584,13 +642,13 @@ void Render(const Snapshot& s) {
     }
     if (!g_problem.empty()) {
         g_problem.clear();
-        SetStatusPart(0, L"Connected to DOSBox.");
+        SetStatusPart(0, L"Connected to " + s.exe + L".");
     }
 
     u3::Party party = u3::DecodeParty(s.raw.data());
     g_party = party;
     UpdateReferences(s, &party);
-    g_debugInfo = Format(L"%ls (pid %lu) @ ", s.exe.c_str(), static_cast<unsigned long>(s.pid)) + Hex64(s.address);
+    g_debugInfo = SourceName(s) + L" @ " + Hex64(s.address);
 
     for (int i = 0; i < 4; ++i) {
         const u3::Character& ch = party.chars[i];
@@ -630,9 +688,12 @@ void RestoreSoldEquipment(u3::DosBoxReader& reader, u3::PartyBytes& previous, ui
 }
 
 DWORD WINAPI Worker(LPVOID) {
-    u3::DosBoxReader reader;
+    u3::DosBoxReader reader(settings::GetString(L"Staging", L"Host", L"127.0.0.1"),
+                            settings::GetInt(L"Staging", L"Port", 8086));
     u3::PartyBytes previous{};
     uint64_t previousAt = 0;  // where `previous` was read from; 0 when there's nothing to compare
+    std::wstring gameFolder;  // looked up once per emulator
+    uint64_t gameFolderSession = 0;
     for (;;) {
         if (g_wantRescan.exchange(false) && reader.Attach()) reader.Scan();
         if (g_wantNext.exchange(false)) reader.NextCandidate();
@@ -664,6 +725,12 @@ DWORD WINAPI Worker(LPVOID) {
         if (snap->ok) {
             RestoreSoldEquipment(reader, previous, previousAt, snap->raw);
             snap->combatTurn = reader.CombatTurn();
+            snap->hasLocation = reader.ReadLocation(snap->raw, snap->location);
+            if (reader.Session() != gameFolderSession) {
+                gameFolderSession = reader.Session();
+                gameFolder = reader.GameFolder();
+            }
+            snap->gameFolder = gameFolder;
             snap->speed = reader.SyncSpeed(WantedSpeed());
         } else {
             previousAt = 0;
@@ -692,6 +759,13 @@ DWORD WINAPI Worker(LPVOID) {
 // ---------------------------------------------------------------------------
 // Window procedure
 // ---------------------------------------------------------------------------
+
+// Remembers where every window is and which are open, for the next run.
+void SaveLayout(HWND hwnd) {
+    settings::SaveWindow(L"Main", hwnd);
+    u3ref::SaveOpenWindows();
+    u3maps::SaveOpenWindows();
+}
 
 void RequestAction(int action, const wchar_t* pending) {
     SetStatusPart(0, pending);
@@ -770,8 +844,10 @@ void RebuildCureMenu() {
 }
 
 bool ColourFor(HWND h, COLORREF* colour) {
+    if (h == g_waitLabel) return *colour = GetSysColor(COLOR_GRAYTEXT), true;
     for (const CharCtl& c : g_chars) {
         if (h == c.status) return *colour = c.statusColor, true;
+        if (h == c.rowVal[ROW_EXP] && c.levelUp) return *colour = COL_GOOD, true;
         if (h == c.name && c.empty) return *colour = GetSysColor(COLOR_GRAYTEXT), true;
     }
     return false;
@@ -779,7 +855,7 @@ bool ColourFor(HWND h, COLORREF* colour) {
 
 void ToggleRaw(HWND hwnd) {
     g_showRaw = !g_showRaw;
-    ShowWindow(g_rawEdit, g_showRaw ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_rawEdit, g_showRaw && g_partyShown ? SW_SHOW : SW_HIDE);
     g_lastHex.clear();
     UpdateRaw();
 
@@ -853,6 +929,7 @@ void SetTopmost(bool on) {
     g_topmost = on;
     SetWindowPos(g_hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     u3ref::SetTopmost(on);
+    u3maps::SetTopmost(on);
     settings::SetInt(L"Preferences", L"AlwaysOnTop", on ? 1 : 0);
 }
 
@@ -1145,6 +1222,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CREATE:
             g_hwnd = hwnd;
             CreateControls();
+            ShowParty(false);  // until the first snapshot finds a party
             Layout();
             g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             g_wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -1198,6 +1276,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_RAW:
                     ToggleRaw(hwnd);
                     return 0;
+            }
+            if (LOWORD(wp) >= IDM_MAPS_BASE && LOWORD(wp) < IDM_MAPS_BASE + u3maps::KIND_COUNT) {
+                u3maps::Show(static_cast<u3maps::Kind>(LOWORD(wp) - IDM_MAPS_BASE), hwnd, g_font, g_dpi, g_topmost);
+                return 0;
             }
             if (LOWORD(wp) >= IDM_REFERENCE_BASE && LOWORD(wp) < IDM_REFERENCE_BASE + u3ref::KIND_COUNT) {
                 u3ref::Show(static_cast<u3ref::Kind>(LOWORD(wp) - IDM_REFERENCE_BASE), hwnd, g_font, g_dpi, g_topmost);
@@ -1316,9 +1398,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
+        case WM_ENDSESSION:
+            // Windows is shutting down or signing out: the app is ended without
+            // WM_DESTROY, so remember the windows now.
+            if (wp) SaveLayout(hwnd);
+            return 0;
+
         case WM_DESTROY:
-            settings::SaveWindow(L"Main", hwnd);
-            u3ref::SaveOpenWindows();
+            SaveLayout(hwnd);
             SetEvent(g_stopEvent);
             WaitForSingleObject(g_thread, 5000);
             PostQuitMessage(0);
@@ -1330,6 +1417,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
+    crash::Install();
     g_inst = inst;
 
     INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES};
@@ -1361,6 +1449,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     prompt.lpszClassName = L"U3StatsPrefs";
     RegisterClassExW(&prompt);
     u3ref::Register(inst, wc.hIcon, wc.hIconSm);
+    u3maps::Register(inst, wc.hIcon, wc.hIconSm);
 
     g_dragListMsg = RegisterWindowMessageW(DRAGLISTMSGSTRING);
 
@@ -1391,6 +1480,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     AppendMenuW(referenceMenu, MF_STRING, IDM_REFERENCE_BASE + u3ref::WEAPONS, L"&Weapons");
     AppendMenuW(referenceMenu, MF_STRING, IDM_REFERENCE_BASE + u3ref::ARMOUR, L"&Armour");
     AppendMenuW(referenceMenu, MF_STRING, IDM_REFERENCE_BASE + u3ref::SPELLS, L"&Spells");
+    HMENU mapsMenu = CreatePopupMenu();
+    AppendMenuW(mapsMenu, MF_STRING, IDM_MAPS_BASE + u3maps::WORLD, L"&World");
+    AppendMenuW(mapsMenu, MF_STRING, IDM_MAPS_BASE + u3maps::DUNGEONS, L"&Dungeons");
+    AppendMenuW(referenceMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(referenceMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(mapsMenu), L"&Maps");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(referenceMenu), L"&Reference");
 
     g_reviveMenu = CreatePopupMenu();
@@ -1425,6 +1519,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     if (!settings::RestoreWindow(L"Main", hwnd)) ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
     u3ref::RestoreOpenWindows(hwnd, g_font, g_dpi, g_topmost);
+    u3maps::RestoreOpenWindows(hwnd, g_font, g_dpi, g_topmost);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

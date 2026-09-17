@@ -58,4 +58,14 @@ void SetInt(const wchar_t* section, const wchar_t* key, int value) {
     WritePrivateProfileStringW(section, key, std::to_wstring(value).c_str(), Path().c_str());
 }
 
+std::wstring GetString(const wchar_t* section, const wchar_t* key, const wchar_t* fallback) {
+    wchar_t text[1024];
+    GetPrivateProfileStringW(section, key, fallback, text, 1024, Path().c_str());
+    return text;
+}
+
+void SetString(const wchar_t* section, const wchar_t* key, const std::wstring& value) {
+    WritePrivateProfileStringW(section, key, value.c_str(), Path().c_str());
+}
+
 }  // namespace settings
