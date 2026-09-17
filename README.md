@@ -6,12 +6,13 @@ It prefers [DOSBox Staging](https://www.dosbox-staging.org/)'s HTTP API and
 falls back to reading the DOSBox process's memory directly.
 
 Features:
-- Main window shows details about each party memeber, including their inventories.
-	- EXP indicator higlights when level up is available from Richard British.
+- Main window shows details about each party member, including their inventories.
+	- EXP indicator highlights when level up is available from Lord British.
 	- Drag and drop interface allows you to move items between characters.
-	- Wear and ready items directly from your inventory.
+	- Wear and ready items directly from your inventory; equipment a shop unequips on a sale is put back.
 	- Pool gold or distribute food evenly between your characters.
 	- Cheat menu for healing, curing and resurrecting.
+	- Game speed menu to shorten, lengthen or pause the wait before the game passes a turn by itself.
 - Map window for displaying world and dungeon maps.
 	- Indicates player's current position with a blinky cursor.
 	- Allows browsing other maps than the one you're currently in.
@@ -20,11 +21,11 @@ Features:
 	- Display full information about items and spells.
 	- Spell list can dynamically limit spells to show only those castable by current active character.
 	- Item lists show which character can use given item when hovering over that item's row.
+- Open windows and their positions are remembered between runs.
 
-
-**Ultima III Assistant** is a native Win32 app in [`u3stats-win32/`](u3stats-win32/), with menus
-for editing food and gold and for slowing or pausing the idle turn timer. Build
-it with `build.cmd`, then run `U3Stats.exe`.
+**Ultima III Assistant** is a native Win32 app in [`u3stats-win32/`](u3stats-win32/). Build
+it with `u3stats-win32/build.cmd`, then run `U3Stats.exe`. Its README covers
+every menu and window.
 
 It finds the party block by signature scan, so it works whatever address DOSBox
 happens to allocate, and keeps retrying until the game is running.
@@ -45,6 +46,7 @@ header) is documented in [`u3stats-win32/README.md`](u3stats-win32/README.md#dat
 ## Requirements
 
 * Windows (the core also builds on Linux)
+* DOSBox Staging 0.83 or later is recommended; GOG's bundled DOSBox 0.74 works too
 * MinGW-w64 (MSYS2 `mingw64`) to build; the exe itself has no dependencies
 * [cpp-httplib](https://github.com/yhirose/cpp-httplib) 0.56.0 (MIT), vendored in
   `core/third_party/cpp-httplib`

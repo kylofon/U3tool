@@ -29,8 +29,9 @@ to someone with the Mark of Kings.
 
 * **File → Preferences…** — **Always on top** (on by default).
 
-The main window's position and size, which reference windows are open and
-where, and Always on top are remembered between runs in
+The main window's position and size, which reference and map windows are open
+and where, the map, dungeon level and Reveal last chosen, explored dungeon
+cells, and Always on top are remembered between runs in
 `%APPDATA%\Ultima III Assistant\settings.ini`. Delete that file to go back to
 the defaults. A saved position that no monitor covers any more is ignored.
 A window counts as open as soon as it opens, so this survives Windows shutting
@@ -192,9 +193,9 @@ none are shown.
 **Reference → Maps → World** and **Dungeons** open map windows drawn from the
 game's own files, found through the running DOSBox's folder (or the config
 files on its command line) and remembered for later. Failing that, the last
-folder found is used, or the GOG default. Like the reference windows, they're resizable, remember where they
-were, and follow Always on top. Each opens on the map the party is on when that
-can be told. It switches when the party enters another place or dungeon level,
+folder found is used, or the GOG default. Like the reference windows, they're
+resizable, remember where they were, and follow Always on top. Each opens on
+the map the party is on when that can be told. It switches when the party enters another place or dungeon level,
 but leaves alone a map you picked while the party stays put.
 
 * **World**: Sosaria, Ambrosia, and every town and castle, chosen from the
@@ -365,14 +366,15 @@ and builds on Windows and Linux alike (`core/CMakeLists.txt`):
 * `core/refdata.h`, `refdata.cpp` — the Weapons, Armour and Spells tables, and
   who in the party can use each row.
 
-
 And in this folder:
 
+* `build.cmd` — the MinGW build.
 * `main.cpp` — window, layout, rendering, polling thread.
 * `reference.h`, `reference.cpp` — the Weapons, Armour and Spells reference
   windows.
 * `maps.h`, `maps.cpp` — the World and Dungeons map windows.
 * `settings.h`, `settings.cpp` — window placement, preferences and explored
   dungeon cells saved between runs.
+* `crash.h`, `crash.cpp` — the crash log and minidump.
 * `app.rc`, `app.manifest`, `app.ico` — icon, visual styles, DPI awareness,
   version info.
