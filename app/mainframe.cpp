@@ -610,8 +610,11 @@ void MainFrame::ShowItemMenu(int member, const wxPoint& screen) {
     list->SetSelection(line);
     const int chosen = list->GetPopupMenuSelectionFromUser(menu, at);
     list->SetSelection(wxNOT_FOUND);
-    if (chosen == ID_EQUIP)
-        RequestAction(PackEquip(equip), item.equipped ? wxString::FromUTF8("Unequipping…") : wxString::FromUTF8("Equipping…"));
+    if (chosen != ID_EQUIP) return;
+    RequestAction(PackEquip(equip),
+                  item.equipped ? wxString::FromUTF8("Unequipping…") : wxString::FromUTF8("Equipping…"));
+    // Show it at once: waiting for the next poll looks as if nothing happened.
+    columns_[member].ShowEquipped(equip.armour, equip.type);
 }
 
 // Remembers where every window is and which are open, for the next run.

@@ -236,11 +236,53 @@ void PartyColumn::Fill(const u3::Character& ch) {
         SetText(counterValue_[k], Num(counters[k]));
     }
 
+    items_ = ch.carried;
+    ShowCarried();
+}
+
+void PartyColumn::ShowCarried() {
     std::vector<CarriedList::Line> lines;
-    for (const u3::CarriedItem& item : ch.carried)
+    for (const u3::CarriedItem& item : items_)
         lines.push_back({wxString(item.name) + wxString::FromUTF8("  × ") + wxString::Format("%d", item.count), true,
                          item.equipped, item.armour});
     if (lines.empty()) lines.push_back({"(nothing)"});
-    items_ = ch.carried;
     list_->SetLines(std::move(lines));
+}
+
+void PartyColumn::ShowEquipped(bool armour, int type) {
+    // Rearrange the lines of that kind the way the game will report them: the
+    // item in use on a line of its own, apart from any spares of its type.
+    std::vector<u3::CarriedItem> kind, others;
+    for (const u3::CarriedItem& item : items_) {
+        std::vector<u3::CarriedItem>& into = item.armour == armour ? kind : others;
+        // Lines split earlier for being in use join up again first.
+        if (!into.empty() && into.back().type == item.type)
+            into.back().count += item.count;
+        else
+            into.push_back(item);
+    }
+    std::vector<u3::CarriedItem> rebuilt;
+    for (const u3::CarriedItem& item : kind) {
+        if (item.type != type) {
+            u3::CarriedItem spare = item;
+            spare.equipped = false;
+            rebuilt.push_back(spare);
+            continue;
+        }
+        u3::CarriedItem inUse = item;
+        inUse.count = 1;
+        inUse.equipped = true;
+        rebuilt.push_back(inUse);
+        if (item.count > 1) {
+            u3::CarriedItem spare = item;
+            spare.count = item.count - 1;
+            spare.equipped = false;
+            rebuilt.push_back(spare);
+        }
+    }
+    // Weapons come before armour, as the game lists them.
+    items_ = armour ? others : rebuilt;
+    const std::vector<u3::CarriedItem>& rest = armour ? rebuilt : others;
+    items_.insert(items_.end(), rest.begin(), rest.end());
+    ShowCarried();
 }

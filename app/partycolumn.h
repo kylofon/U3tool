@@ -25,6 +25,10 @@ public:
     void Fill(const u3::Character& ch);
     void ShowEmpty();
 
+    // Shows a weapon (or armour) as readied straight away, before the game
+    // has been asked; type 0 for nothing readied. The next poll confirms it.
+    void ShowEquipped(bool armour, int type);
+
     wxStaticBox* Box() const { return box_; }
     CarriedList* List() const { return list_; }
     // What each line of the Carrying list holds; shorter than the list for "(nothing)".
@@ -34,6 +38,7 @@ private:
     enum Row { ROW_HP, ROW_MP, ROW_EXP, ROW_FOOD, ROW_GOLD, ROW_COUNT };
 
     void SetBar(int max, int pos, int state);
+    void ShowCarried();
 
     wxStaticBox* box_ = nullptr;
     wxStaticText* name_ = nullptr;
