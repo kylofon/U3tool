@@ -1,0 +1,73 @@
+# Builds on every push: the portable core on Linux (there's no Linux UI yet),
+# and the whole Windows app with MinGW, as build.cmd does locally.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-core:
+    name: Linux (core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build core
+        run: |
+          cmake -S core -B build/core -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/core --parallel
+
+      # A static library links nothing, so link and run a small program that
+      # calls into every part of the core to catch missing symbols too.
+      - name: Link and run a smoke check
+        run: |
+          cat > build/smoke.cpp <<'EOF'
+          #include <iostream>
+          #include <unistd.h>
+          #include "mapdata.h"
+          #include "reader.h"
+          #include "refdata.h"
+
+          int main() {
+              u3::DosBoxReader reader(L"127.0.0.1", 8086);
+              const bool attached = reader.Attach();  // no DOSBox here: must fail cleanly
+              std::wcout << L"attach: " << attached << L" (" << reader.lastError << L")\n";
+              std::wcout << L"game folder of this process: '" << u3::FindGameFolder(getpid()) << L"'\n";
+              std::wcout << L"listener on 8086: " << u3::ListeningProcess(8086) << L"\n";
+              std::wcout << L"process fallback: " << (u3::ConnectProcess() ? L"yes" : L"no") << L"\n";
+              std::wcout << L"spell rows: " << u3::ref::TABLES[u3::ref::SPELLS].RowCount() << L"\n";
+              std::wcout << L"world map pixels: " << u3::RenderWorld({}, u3::Tiles{}).size() << L"\n";
+              u3::ExploredCells cells{};
+              u3::ExploreAround(cells, 0, 0);
+              std::wcout << L"explored: " << u3::ExploredToHex(cells) << L"\n";
+              return attached ? 1 : 0;
+          }
+          EOF
+          g++ -std=c++17 -Wall -Wextra -Icore build/smoke.cpp build/core/libu3core.a -pthread -o build/smoke
+          ./build/smoke
+
+  windows-app:
+    name: Windows (app)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+
+      - name: Build U3Stats.exe
+        shell: msys2 {0}
+        run: cd u3stats-win32 && cmd //c build.cmd
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: U3Stats
+          path: u3stats-win32/U3Stats.exe
+          retention-days: 14
