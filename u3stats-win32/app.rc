@@ -1,11 +1,13 @@
 #include <windows.h>
 
+#include "version.h"
+
 1 ICON "app.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION APP_VERSION_MAJOR,APP_VERSION_MINOR,APP_VERSION_PATCH,0
+PRODUCTVERSION APP_VERSION_MAJOR,APP_VERSION_MINOR,APP_VERSION_PATCH,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,7 +17,9 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "Ultima III Assistant"
       VALUE "ProductName", "Ultima III Assistant"
-      VALUE "FileVersion", "1.0.0.0"
+      VALUE "FileVersion", APP_VERSION_TEXT
+      VALUE "ProductVersion", APP_VERSION_TEXT
+      VALUE "CompanyName", "Krzysztof Kania"
     END
   END
   BLOCK "VarFileInfo"

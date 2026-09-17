@@ -44,6 +44,8 @@ If the app crashes, the exception and a stack trace are appended to
 0x140000000 and look the result up in `U3Stats.map`, which `build.cmd` writes.
 
 * **File → Quit**
+* **About** — the version, author and links to kkania.com, the GitHub
+  repository and Buy Me a Coffee, which open in your browser.
 * **Debug** — its first, greyed line shows the emulator (DOSBox Staging's API
   or the DOSBox process) and the party block's address.
 * **Debug → Rescan memory** — force a fresh search of the emulated memory.
@@ -378,3 +380,4 @@ And in this folder:
 * `crash.h`, `crash.cpp` — the crash log and minidump.
 * `app.rc`, `app.manifest`, `app.ico` — icon, visual styles, DPI awareness,
   version info.
+* `version.h` — the version number, used by `app.rc` and the About box.

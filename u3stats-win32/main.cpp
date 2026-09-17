@@ -6,6 +6,7 @@
 // touching only what actually changed so nothing flickers.
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +20,7 @@
 #include "maps.h"
 #include "reference.h"
 #include "settings.h"
+#include "version.h"
 
 namespace {
 
@@ -43,6 +45,7 @@ enum : int {
     IDM_POOL_BASE = 210,  // IDM_POOL_BASE + party member
     IDM_EQUIP = 220,
     IDM_DEBUG_INFO,
+    IDM_ABOUT,
     IDM_REFERENCE_BASE = 230,  // IDM_REFERENCE_BASE + u3ref::Kind
     IDM_REVIVE_BASE = 240,     // IDM_REVIVE_BASE + party member
     IDM_HEAL_BASE = 250,       // IDM_HEAL_BASE + party member
@@ -760,6 +763,33 @@ DWORD WINAPI Worker(LPVOID) {
 // Window procedure
 // ---------------------------------------------------------------------------
 
+// The About box: a task dialog whose links open in the browser.
+HRESULT CALLBACK AboutCallback(HWND hwnd, UINT msg, WPARAM, LPARAM lp, LONG_PTR) {
+    if (msg == TDN_HYPERLINK_CLICKED)
+        ShellExecuteW(hwnd, L"open", reinterpret_cast<LPCWSTR>(lp), nullptr, nullptr, SW_SHOWNORMAL);
+    return S_OK;
+}
+
+void ShowAbout(HWND owner) {
+    const std::wstring title = std::wstring(L"About ") + APP_TITLE;
+    const std::wstring heading = std::wstring(APP_TITLE) + L" " + TEXT(APP_VERSION_TEXT);
+    TASKDIALOGCONFIG dialog{};
+    dialog.cbSize = sizeof dialog;
+    dialog.hwndParent = owner;
+    dialog.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_USE_HICON_MAIN | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    dialog.dwCommonButtons = TDCBF_OK_BUTTON;
+    dialog.pszWindowTitle = title.c_str();
+    dialog.hMainIcon = reinterpret_cast<HICON>(GetClassLongPtrW(owner, GCLP_HICON));
+    dialog.pszMainInstruction = heading.c_str();
+    dialog.pszContent = L"A live party viewer and editor for Ultima III: Exodus.\n\n"
+                        L"Author: Krzysztof Kania\n"
+                        L"Website: <a href=\"https://kkania.com\">kkania.com</a>\n"
+                        L"Source: <a href=\"https://github.com/kylofon/U3tool\">github.com/kylofon/U3tool</a>\n"
+                        L"Support: <a href=\"https://buymeacoffee.com/krzysztofkania\">buymeacoffee.com/krzysztofkania</a>";
+    dialog.pfCallback = AboutCallback;
+    TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr);
+}
+
 // Remembers where every window is and which are open, for the next run.
 void SaveLayout(HWND hwnd) {
     settings::SaveWindow(L"Main", hwnd);
@@ -1246,6 +1276,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_QUIT:
                     DestroyWindow(hwnd);
                     return 0;
+                case IDM_ABOUT:
+                    ShowAbout(hwnd);
+                    return 0;
                 case IDM_FOOD:
                     RequestAction(ACTION_FOOD, L"Distributing food…");
                     return 0;
@@ -1507,6 +1540,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     AppendMenuW(g_debugMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_debugMenu, MF_STRING, IDM_RAW, L"Raw &bytes");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_debugMenu), L"&Debug");
+    AppendMenuW(menuBar, MF_STRING, IDM_ABOUT, L"A&bout");
 
     g_topmost = settings::GetInt(L"Preferences", L"AlwaysOnTop", 1) != 0;
     const std::wstring title = std::wstring(APP_TITLE) + L" (Not connected)";
