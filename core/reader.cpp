@@ -79,10 +79,6 @@ int Bcd2(const uint8_t* r, size_t off) {
 
 uint8_t ToBcd(int v) { return static_cast<uint8_t>(((v / 10) << 4) | (v % 10)); }
 
-// Two BCD bytes hold four digits, so no character can carry more than this.
-constexpr int MAX_BCD2 = 9999;
-constexpr int MAX_BCD1 = 99;  // likewise one byte, e.g. of any one item
-
 const uint8_t* Record(const PartyBytes& raw, int member) {
     return raw.data() + HEADER_SIZE + member * RECORD_SIZE;
 }

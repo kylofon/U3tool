@@ -102,6 +102,35 @@ wxString MemberLine(const std::wstring& name, const wxString& info) {
 
 bool IsDead(const u3::Character& ch) { return ch.statusCode == 'D' || ch.statusCode == 'A'; }
 
+void SetGood(u3::Character& ch) {
+    ch.statusCode = 'G';
+    ch.status = L"Good";
+}
+
+// Hands `count` of an item over, keeping the game's order: weapons by type,
+// then armour, with anything in use on its own line.
+void HandOver(u3::Character& giver, u3::Character& taker, const u3::CarriedItem& item, int count) {
+    for (auto line = giver.carried.begin(); line != giver.carried.end(); ++line) {
+        if (line->armour != item.armour || line->type != item.type || line->equipped) continue;
+        line->count -= std::min(count, line->count);
+        if (line->count == 0) giver.carried.erase(line);
+        break;
+    }
+    for (u3::CarriedItem& line : taker.carried) {
+        if (line.armour != item.armour || line.type != item.type || line.equipped) continue;
+        line.count = std::min(line.count + count, u3::MAX_BCD1);
+        return;
+    }
+    auto at = taker.carried.begin();
+    while (at != taker.carried.end() &&
+           (at->armour < item.armour || (at->armour == item.armour && at->type < item.type)))
+        ++at;
+    u3::CarriedItem fresh = item;
+    fresh.count = count;
+    fresh.equipped = false;
+    taker.carried.insert(at, fresh);
+}
+
 wxString DescribeSpeed(const u3::GameSpeed& speed) {
     if (speed.paused) return wxString::FromUTF8("paused — turns pass only when you act");
     const char* pace = speed.passSeconds == u3::NORMAL_PASS_SECONDS  ? "normal"
@@ -290,8 +319,16 @@ void MainFrame::CreateMenus() {
         bool on = topmost_;
         if (ShowPreferences(this, on)) SetTopmost(on);
     }, wxID_PREFERENCES);
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) { RequestAction(ACTION_FOOD, wxString::FromUTF8("Distributing food…")); },
-         ID_FOOD);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+        RequestAction(ACTION_FOOD, wxString::FromUTF8("Distributing food…"));
+        Predict([](u3::Party& party) {
+            int total = 0;
+            for (int i = 0; i < party.count; ++i) total += std::max(party.chars[i].food, 0);
+            // An even split, with any remainder going one apiece to the first members.
+            const int share = total / party.count, extra = total % party.count;
+            for (int i = 0; i < party.count; ++i) party.chars[i].food = share + (i < extra ? 1 : 0);
+        });
+    }, ID_FOOD);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetSpeed(step_ - 1, false); }, ID_FASTER);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetSpeed(step_ + 1, false); }, ID_SLOWER);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetSpeed(step_, !paused_); }, ID_PAUSE);
@@ -313,16 +350,38 @@ void MainFrame::CreateMenus() {
         mapwin::Show(static_cast<mapwin::Kind>(e.GetId() - ID_MAPS_BASE), this, topmost_);
     }, ID_MAPS_BASE, ID_MAPS_BASE + mapwin::KIND_COUNT - 1);
     Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
-        RequestAction(ACTION_POOL + (e.GetId() - ID_POOL_BASE), wxString::FromUTF8("Pooling gold…"));
+        const int target = e.GetId() - ID_POOL_BASE;
+        RequestAction(ACTION_POOL + target, wxString::FromUTF8("Pooling gold…"));
+        Predict([target](u3::Party& party) {
+            // Nobody can hold more than 9999, so the rest stays with the others.
+            int room = u3::MAX_BCD2 - std::max(party.chars[target].gold, 0), moved = 0;
+            for (int i = 0; i < party.count && moved < room; ++i) {
+                if (i == target) continue;
+                const int take = std::min(std::max(party.chars[i].gold, 0), room - moved);
+                party.chars[i].gold -= take;
+                moved += take;
+            }
+            party.chars[target].gold += moved;
+        });
     }, ID_POOL_BASE, ID_POOL_BASE + 3);
     Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
-        RequestAction(ACTION_REVIVE + (e.GetId() - ID_REVIVE_BASE), wxString::FromUTF8("Reviving…"));
+        const int member = e.GetId() - ID_REVIVE_BASE;
+        RequestAction(ACTION_REVIVE + member, wxString::FromUTF8("Reviving…"));
+        Predict([member](u3::Party& party) {
+            u3::Character& ch = party.chars[member];
+            SetGood(ch);
+            ch.hp = ch.maxHp;
+        });
     }, ID_REVIVE_BASE, ID_REVIVE_BASE + 3);
     Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
-        RequestAction(ACTION_HEAL + (e.GetId() - ID_HEAL_BASE), wxString::FromUTF8("Healing…"));
+        const int member = e.GetId() - ID_HEAL_BASE;
+        RequestAction(ACTION_HEAL + member, wxString::FromUTF8("Healing…"));
+        Predict([member](u3::Party& party) { party.chars[member].hp = party.chars[member].maxHp; });
     }, ID_HEAL_BASE, ID_HEAL_BASE + 3);
     Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
-        RequestAction(ACTION_CURE + (e.GetId() - ID_CURE_BASE), wxString::FromUTF8("Curing…"));
+        const int member = e.GetId() - ID_CURE_BASE;
+        RequestAction(ACTION_CURE + member, wxString::FromUTF8("Curing…"));
+        Predict([member](u3::Party& party) { SetGood(party.chars[member]); });
     }, ID_CURE_BASE, ID_CURE_BASE + 3);
 }
 
@@ -572,6 +631,9 @@ void MainFrame::GiveItems(int from, int to, const u3::CarriedItem& item) {
         if (move.count == 0) return;
     }
     RequestAction(PackMove(move), wxString::FromUTF8("Moving items…"));
+    Predict([&move, &item](u3::Party& party) {
+        HandOver(party.chars[move.from], party.chars[move.to], item, move.count);
+    });
 }
 
 // Right-click on a carried item: Ready / Wear it, or put it away.
@@ -615,6 +677,12 @@ void MainFrame::ShowItemMenu(int member, const wxPoint& screen) {
                   item.equipped ? wxString::FromUTF8("Unequipping…") : wxString::FromUTF8("Equipping…"));
     // Show it at once: waiting for the next poll looks as if nothing happened.
     columns_[member].ShowEquipped(equip.armour, equip.type);
+}
+
+void MainFrame::Predict(const std::function<void(u3::Party&)>& change) {
+    if (!live_) return;
+    change(party_);
+    for (int i = 0; i < party_.count && i < 4; ++i) columns_[i].Fill(party_.chars[i]);
 }
 
 // Remembers where every window is and which are open, for the next run.

@@ -23,6 +23,11 @@ constexpr size_t PARTY_SIZE = HEADER_SIZE + 4 * RECORD_SIZE;  // 274
 
 using PartyBytes = std::array<uint8_t, PARTY_SIZE>;
 
+// Two BCD bytes hold four digits, so no character can carry more food or gold
+// than this; likewise one byte for each kind of item.
+constexpr int MAX_BCD2 = 9999;
+constexpr int MAX_BCD1 = 99;
+
 struct CarriedItem {
     std::wstring name;
     int count = 0;

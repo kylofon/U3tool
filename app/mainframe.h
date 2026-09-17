@@ -6,6 +6,7 @@
 #include <wx/frame.h>
 
 #include <atomic>
+#include <functional>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -56,6 +57,9 @@ private:
     void SetTopmost(bool on);
     void SaveLayout();
     void GiveItems(int from, int to, const u3::CarriedItem& item);
+    // Shows what an action will do before the game confirms it, so the columns
+    // don't look unchanged for a poll.
+    void Predict(const std::function<void(u3::Party&)>& change);
     void ShowItemMenu(int member, const wxPoint& screen);
     int DropTarget(const wxPoint& screen) const;
     void RebuildMemberMenus();
