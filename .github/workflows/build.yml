@@ -1,5 +1,5 @@
-# Builds on every push: the portable core on Linux (there's no Linux UI yet),
-# and the whole Windows app with MinGW, as build.cmd does locally.
+# Builds on every push: the core and the wxWidgets app on Linux and Windows,
+# and the Win32 app (until the wxWidgets one replaces it).
 name: Build
 
 on:
@@ -11,20 +11,25 @@ permissions:
   contents: read
 
 jobs:
-  linux-core:
-    name: Linux (core)
+  linux:
+    name: Linux (core and wxWidgets app)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Build core
+      - name: Install wxWidgets
         run: |
-          cmake -S core -B build/core -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/core --parallel
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwxgtk3.2-dev xvfb
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
 
       # A static library links nothing, so link and run a small program that
       # calls into every part of the core to catch missing symbols too.
-      - name: Link and run a smoke check
+      - name: Link and run a smoke check of the core
         run: |
           cat > build/smoke.cpp <<'EOF'
           #include <iostream>
@@ -52,8 +57,56 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Icore build/smoke.cpp build/core/libu3core.a -pthread -o build/smoke
           ./build/smoke
 
-  windows-app:
-    name: Windows (app)
+      # Start the app on a virtual display: it should still be running after a
+      # few seconds (timeout's exit status 124) rather than crash.
+      - name: Start the app
+        run: |
+          set +e
+          timeout 5 xvfb-run -a "./build/app/Ultima III Assistant"
+          status=$?
+          echo "exit status $status"
+          test $status -eq 124
+
+  windows:
+    name: Windows (wxWidgets app)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-wxwidgets3.2-msw
+            mingw-w64-x86_64-ntldd
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      # The exe with the wxWidgets and MinGW runtime DLLs it needs beside it.
+      - name: Gather the DLLs
+        shell: msys2 {0}
+        run: |
+          mkdir -p dist
+          cp "build/app/Ultima III Assistant.exe" dist/
+          ntldd -R "dist/Ultima III Assistant.exe" | grep -i 'mingw64' | sed 's/.*=> //; s/ (0x.*//' | sort -u |
+            while read -r dll; do cp "$(cygpath -u "$dll")" dist/; done
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Ultima III Assistant (wxWidgets)
+          path: dist/
+          retention-days: 14
+
+  windows-win32:
+    name: Windows (Win32 app)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
