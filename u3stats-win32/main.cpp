@@ -986,7 +986,7 @@ void ShowPreferences() {
     g_prefs = PrefsDialog{};
     const int pad = S(12), rowH = S(26), btnW = S(80), clientW = S(300);
     const int buttonsY = pad + rowH + S(14);
-    HWND dlg = CreatePopup(L"U3StatsPrefs", L"Preferences", clientW, buttonsY + rowH + pad);
+    HWND dlg = CreatePopup(L"U3AssistantPrefs", L"Preferences", clientW, buttonsY + rowH + pad);
     if (!dlg) return;
 
     g_prefs.topmostCheck = PopupChild(dlg, L"BUTTON", L"Always on &top", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_TOPMOST,
@@ -1061,7 +1061,7 @@ int AskCount(const std::wstring& prompt, int max) {
 
     const int pad = S(12), rowH = S(26), step = S(28), editW = S(56), btnW = S(80), clientW = S(340);
     const int textH = 2 * g_lineH, countY = pad + textH + S(6), buttonsY = countY + rowH + S(14);
-    HWND dlg = CreatePopup(L"U3StatsCount", L"Move items", clientW, buttonsY + rowH + pad);
+    HWND dlg = CreatePopup(L"U3AssistantCount", L"Move items", clientW, buttonsY + rowH + pad);
     if (!dlg) return 0;
 
     PopupChild(dlg, L"STATIC", prompt.c_str(), SS_NOPREFIX, 0, pad, pad, clientW - 2 * pad, textH);
@@ -1467,7 +1467,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"U3StatsWindow";
+    wc.lpszClassName = L"U3AssistantMain";
     wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
                                              GetSystemMetrics(SM_CYICON), 0));
     wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
@@ -1476,10 +1476,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
 
     WNDCLASSEXW prompt = wc;
     prompt.lpfnWndProc = PromptProc;
-    prompt.lpszClassName = L"U3StatsCount";
+    prompt.lpszClassName = L"U3AssistantCount";
     RegisterClassExW(&prompt);
     prompt.lpfnWndProc = PrefsProc;
-    prompt.lpszClassName = L"U3StatsPrefs";
+    prompt.lpszClassName = L"U3AssistantPrefs";
     RegisterClassExW(&prompt);
     u3ref::Register(inst, wc.hIcon, wc.hIconSm);
     u3maps::Register(inst, wc.hIcon, wc.hIconSm);

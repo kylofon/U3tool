@@ -63,12 +63,12 @@ jobs:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
 
-      - name: Build U3Stats.exe
+      - name: Build Ultima III Assistant.exe
         shell: msys2 {0}
         run: cd u3stats-win32 && cmd //c build.cmd
 
       - uses: actions/upload-artifact@v7
         with:
-          name: U3Stats
-          path: u3stats-win32/U3Stats.exe
+          name: Ultima III Assistant
+          path: u3stats-win32/Ultima III Assistant.exe
           retention-days: 14

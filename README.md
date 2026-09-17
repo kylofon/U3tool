@@ -27,13 +27,13 @@ Features:
 
 Get `ultima3-assistant-<version>-win64.zip` from
 [Releases](https://github.com/kylofon/U3tool/releases), unzip it anywhere and run
-`U3Stats.exe`. Start the game before or after; the assistant finds it by itself.
+`Ultima III Assistant.exe`. Start the game before or after; the assistant finds it by itself.
 The zip also has the `staging` folder for playing in DOSBox Staging (see below).
 
 ## Details
 
 **Ultima III Assistant** is a native Win32 app in [`u3stats-win32/`](u3stats-win32/). Build
-it with `u3stats-win32/build.cmd`, then run `U3Stats.exe`. Its README covers
+it with `u3stats-win32/build.cmd`, then run `Ultima III Assistant.exe`. Its README covers
 every menu and window.
 
 It finds the party block by signature scan, so it works whatever address DOSBox
@@ -62,7 +62,7 @@ header) is documented in [`u3stats-win32/README.md`](u3stats-win32/README.md#dat
 
 GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml))
 builds every push: the core on Linux, linked into a small smoke check that it
-runs, and the Windows app with MinGW. The built `U3Stats.exe` is attached to
+runs, and the Windows app with MinGW. The built `Ultima III Assistant.exe` is attached to
 each run for 14 days.
 
 ## License

@@ -20,6 +20,8 @@ BEGIN
       VALUE "FileVersion", APP_VERSION_TEXT
       VALUE "ProductVersion", APP_VERSION_TEXT
       VALUE "CompanyName", "Krzysztof Kania"
+      VALUE "InternalName", "Ultima III Assistant"
+      VALUE "OriginalFilename", "Ultima III Assistant.exe"
     END
   END
   BLOCK "VarFileInfo"

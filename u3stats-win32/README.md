@@ -6,7 +6,7 @@ progress bars for hit points, list boxes for carried items, push buttons and
 check boxes, themed through Common Controls v6. No runtime or DLLs beyond
 what ships with Windows.
 
-Run `U3Stats.exe`. It attaches to DOSBox by itself and keeps retrying, so start
+Run `Ultima III Assistant.exe`. It attaches to DOSBox by itself and keeps retrying, so start
 order doesn't matter (see [Connecting to the game](#connecting-to-the-game)). The title bar says **(Connected)** once a party is live and
 **(Not connected)** otherwise, with the reason in the status bar. While not
 connected the window shows only "Waiting for connection, is the game running?".
@@ -40,8 +40,9 @@ app quits (as the taskbar's **Close all windows** does) still counts as open.
 
 If the app crashes, the exception and a stack trace are appended to
 `%APPDATA%\Ultima III Assistant\crashes\crash.log`, with a minidump
-(`crash-<date>-<time>.dmp`) beside it. Addresses read `U3Stats.exe+0x…`: add
-0x140000000 and look the result up in `U3Stats.map`, which `build.cmd` writes.
+(`crash-<date>-<time>.dmp`) beside it. Addresses read `Ultima III Assistant.exe+0x…`: add
+0x140000000 and look the result up in `Ultima III Assistant.map`, which
+`build.cmd` writes.
 
 * **File → Quit**
 * **About** — the version, author and links to kkania.com, the GitHub
@@ -351,7 +352,7 @@ if a label is off, swap the `O_GEMS` and `O_KEYS` constants at the top of
 ## Building
 
 Needs MinGW-w64 (MSYS2 `mingw64`). Run `build.cmd`; it produces a statically
-linked `U3Stats.exe` from this folder and `../core`. The Windows libraries it
+linked `Ultima III Assistant.exe` from this folder and `../core`. The Windows libraries it
 links ship with Windows; cpp-httplib is a header in `../core/third_party`.
 
 ## Files
