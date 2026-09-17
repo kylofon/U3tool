@@ -23,6 +23,15 @@ Features:
 	- Item lists show which character can use given item when hovering over that item's row.
 - Open windows and their positions are remembered between runs.
 
+## Download
+
+Get `ultima3-assistant-<version>-win64.zip` from
+[Releases](https://github.com/kylofon/U3tool/releases), unzip it anywhere and run
+`U3Stats.exe`. Start the game before or after; the assistant finds it by itself.
+The zip also has the `staging` folder for playing in DOSBox Staging (see below).
+
+## Details
+
 **Ultima III Assistant** is a native Win32 app in [`u3stats-win32/`](u3stats-win32/). Build
 it with `u3stats-win32/build.cmd`, then run `U3Stats.exe`. Its README covers
 every menu and window.
@@ -56,7 +65,12 @@ builds every push: the core on Linux, linked into a small smoke check that it
 runs, and the Windows app with MinGW. The built `U3Stats.exe` is attached to
 each run for 14 days.
 
-The app icon is the Golem tile (`0x68`) from the game's `SHAPES.VGA`.
+## License
+
+Ultima III Assistant is MIT licensed (see `LICENSE`). *Ultima III: Exodus* is © Origin Systems / Electronic Arts;
+its files are not part of this repository or the releases. The app icon is the Golem tile (`0x68`) from the
+VGA tileset by Joshua Steele that ships with the Exodus Project's Ultima III Upgrade, and isn't covered by the
+MIT licence. cpp-httplib keeps its own MIT licence.
 
 ## Support
 
