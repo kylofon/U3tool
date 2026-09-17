@@ -58,3 +58,7 @@ each run for 14 days.
 
 `u3stats-win32/app.ico` is the game's icon from the GOG install, so keep this
 repository private or swap in your own icon before publishing it.
+
+## Support
+
+https://buymeacoffee.com/krzysztofkania
