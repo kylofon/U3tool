@@ -1,7 +1,7 @@
 // crash.cpp -- records crashes in %APPDATA%\Ultima III Assistant\crashes.
 //
 // Addresses are logged as module+offset. For "Ultima III Assistant.exe", look the
-// offset up in "Ultima III Assistant.map" (written by build.cmd) after adding
+// offset up in "Ultima III Assistant.map" (written by the build) after adding
 // the image base, 0x140000000.
 #include "crash.h"
 

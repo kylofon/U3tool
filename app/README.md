@@ -1,10 +1,11 @@
-# Ultima III Assistant — native Win32 build
+# Ultima III Assistant — the app
 
-A live party viewer and editor for Ultima III, built as a standalone Windows executable
-using standard Win32 controls: group boxes, static labels,
-progress bars for hit points, list boxes for carried items, push buttons and
-check boxes, themed through Common Controls v6. No runtime or DLLs beyond
-what ships with Windows.
+A live party viewer and editor for Ultima III, built with
+[wxWidgets](https://www.wxwidgets.org/) 3.2 for Windows and Linux. wxWidgets
+draws each window from the platform's own controls, so on Windows it looks like
+the Win32 build it replaces: group boxes, static labels, progress bars for hit
+points, a list of carried items, push buttons and check boxes, themed through
+Common Controls 6. A few touches are Windows-only, and noted below.
 
 Run `Ultima III Assistant.exe`. It attaches to DOSBox by itself and keeps retrying, so start
 order doesn't matter (see [Connecting to the game](#connecting-to-the-game)). The title bar says **(Connected)** once a party is live and
@@ -38,11 +39,11 @@ A window counts as open as soon as it opens, so this survives Windows shutting
 down or the app being ended. A window closed less than two seconds before the
 app quits (as the taskbar's **Close all windows** does) still counts as open.
 
-If the app crashes, the exception and a stack trace are appended to
+On Windows, if the app crashes, the exception and a stack trace are appended to
 `%APPDATA%\Ultima III Assistant\crashes\crash.log`, with a minidump
 (`crash-<date>-<time>.dmp`) beside it. Addresses read `Ultima III Assistant.exe+0x…`: add
 0x140000000 and look the result up in `Ultima III Assistant.map`, which
-`build.cmd` writes.
+the build writes.
 
 * **File → Quit**
 * **About** — the version, author and links to kkania.com, the GitHub
@@ -349,11 +350,39 @@ one of each in a guild and compare against the in-game Ztats screen to confirm;
 if a label is off, swap the `O_GEMS` and `O_KEYS` constants at the top of
 `core/reader.cpp`.
 
+## Windows and Linux
+
+Everything works on both, apart from these:
+
+| | Windows | Linux |
+|---|---|---|
+| Hit point bars | green, yellow at half health, red at a quarter | the theme's own colour |
+| Spells window | the two spell groups are native list groups | bold heading rows |
+| Classes column header | hovering it explains the class letters | no tooltip |
+| Member menu items | the details sit at the right edge, after a tab | after a dash |
+| About box | the Windows task dialog | a dialog with the same contents |
+| Crash reports | a log and a minidump (see above) | left to the system |
+| Settings | `%APPDATA%\Ultima III Assistant\settings.ini` | `~/.config/ultima3-assistant/settings.ini` |
+
 ## Building
 
-Needs MinGW-w64 (MSYS2 `mingw64`). Run `build.cmd`; it produces a statically
-linked `Ultima III Assistant.exe` from this folder and `../core`. The Windows libraries it
-links ship with Windows; cpp-httplib is a header in `../core/third_party`.
+Needs CMake 3.16, a C++17 compiler and wxWidgets 3.2. From the repository root:
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+That builds `core` and this folder into `build/app/Ultima III Assistant`
+(`.exe` on Windows). Pass `-DU3_BUILD_APP=OFF` for the core alone.
+
+* **Windows:** MSYS2 `mingw64` with `mingw-w64-x86_64-gcc`,
+  `mingw-w64-x86_64-cmake`, `mingw-w64-x86_64-ninja` and
+  `mingw-w64-x86_64-wxwidgets3.2-msw`. Add `-G Ninja`. The exe needs the
+  wxWidgets DLLs beside it or on the PATH; the releases ship them.
+* **Debian and Ubuntu:** `libwxgtk3.2-dev`.
+
+cpp-httplib is a header in `../core/third_party`.
 
 ## Files
 
@@ -376,14 +405,23 @@ and builds on Windows and Linux alike (`core/CMakeLists.txt`):
 
 And in this folder:
 
-* `build.cmd` — the MinGW build.
-* `main.cpp` — window, layout, rendering, polling thread.
-* `reference.h`, `reference.cpp` — the Weapons, Armour and Spells reference
+* `CMakeLists.txt` — the build.
+* `app.cpp` — the wxWidgets application: the crash handler, then the main window.
+* `mainframe.h`, `mainframe.cpp` — the main window, its menus and the polling
+  thread, including showing an edit before the game confirms it.
+* `partycolumn.h`, `partycolumn.cpp` — one party member's box.
+* `carriedlist.h`, `carriedlist.cpp` — the Carrying list: drawing the lines and
+  dragging items onto another member.
+* `dialogs.h`, `dialogs.cpp` — the About box, Preferences and the "move how
+  many" prompt.
+* `referenceframe.h`, `referenceframe.cpp` — the Weapons, Armour and Spells
   windows.
-* `maps.h`, `maps.cpp` — the World and Dungeons map windows.
+* `mapframe.h`, `mapframe.cpp` — the World and Dungeons map windows.
 * `settings.h`, `settings.cpp` — window placement, preferences and explored
   dungeon cells saved between runs.
-* `crash.h`, `crash.cpp` — the crash log and minidump.
+* `icon.h`, `icon.cpp` — the app icon, drawn from the Golem tile so both
+  platforms show the same picture.
+* `crash.h`, `crash.cpp` — the crash log and minidump (Windows only).
 * `app.rc`, `app.manifest`, `app.ico` — icon, visual styles, DPI awareness,
-  version info.
+  version info (Windows only).
 * `version.h` — the version number, used by `app.rc` and the About box.

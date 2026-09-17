@@ -1,5 +1,4 @@
-# Builds on every push: the core and the wxWidgets app on Linux and Windows,
-# and the Win32 app (until the wxWidgets one replaces it).
+# Builds the core and the app on Linux and Windows on every push.
 name: Build
 
 on:
@@ -12,7 +11,7 @@ permissions:
 
 jobs:
   linux:
-    name: Linux (core and wxWidgets app)
+    name: Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -68,7 +67,7 @@ jobs:
           test $status -eq 124
 
   windows:
-    name: Windows (wxWidgets app)
+    name: Windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -101,27 +100,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: Ultima III Assistant (wxWidgets)
+          name: Ultima III Assistant
           path: dist/
           retention-days: 14
 
-  windows-win32:
-    name: Windows (Win32 app)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
-
-      - name: Build Ultima III Assistant.exe
-        shell: msys2 {0}
-        run: cd u3stats-win32 && cmd //c build.cmd
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Ultima III Assistant
-          path: u3stats-win32/Ultima III Assistant.exe
-          retention-days: 14

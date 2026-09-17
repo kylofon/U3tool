@@ -37,15 +37,18 @@ The Dungeon maps window showing a whole level of Dardin's Pit with **Reveal** on
 ## Download
 
 Get `ultima3-assistant-<version>-win64.zip` from
-[Releases](https://github.com/kylofon/ultima3-assistant/releases), unzip it anywhere and run
-`Ultima III Assistant.exe`. Start the game before or after; the assistant finds it by itself.
-The zip also has the `staging` folder for playing in DOSBox Staging (see below).
+[Releases](https://github.com/kylofon/ultima3-assistant/releases), unzip it
+anywhere and run `Ultima III Assistant.exe`. Start the game before or after; the
+assistant finds it by itself. The zip also has the DLLs the app needs and the
+`staging` folder for playing in DOSBox Staging (see below). On Linux, build it
+from source for now.
 
 ## Details
 
-**Ultima III Assistant** is a native Win32 app in [`u3stats-win32/`](u3stats-win32/). Build
-it with `u3stats-win32/build.cmd`, then run `Ultima III Assistant.exe`. Its README covers
-every menu and window.
+**Ultima III Assistant** is a [wxWidgets](https://www.wxwidgets.org/) app in
+[`app/`](app/), built on the platform-neutral core in [`core/`](core/). Its
+[README](app/README.md) covers every menu and window, how to build it, and the
+few differences between Windows and Linux.
 
 It finds the party block by signature scan, so it works whatever address DOSBox
 happens to allocate, and keeps retrying until the game is running.
@@ -53,28 +56,26 @@ happens to allocate, and keeps retrying until the game is running.
 To play in DOSBox Staging 0.83+ with its API on, run
 [`staging/Play in DOSBox Staging.cmd`](staging/). It uses the GOG install's
 config files unchanged, plus `staging/assistant.conf`. See
-[Connecting to the game](u3stats-win32/README.md#connecting-to-the-game).
-
-The UI is being moved to a cross-platform toolkit. Everything that isn't UI
-(reading and editing the game, the reference and map data) already lives in
-[`core/`](core/), which has no Windows dependencies apart from the optional
-direct process-memory access.
+[Connecting to the game](app/README.md#connecting-to-the-game).
 
 The reverse-engineered `PARTY.ULT` / in-memory layout (BCD fields, item tables,
-header) is documented in [`u3stats-win32/README.md`](u3stats-win32/README.md#data-layout).
+header) is documented in [`app/README.md`](app/README.md#data-layout).
 
 ## Requirements
 
-* Windows (the core also builds on Linux)
-* DOSBox Staging 0.83 or later is recommended; GOG's bundled DOSBox 0.74 works too
-* MinGW-w64 (MSYS2 `mingw64`) to build; the exe itself has no dependencies
+* Windows or Linux
+* DOSBox Staging 0.83 or later is recommended; GOG's bundled DOSBox 0.74 works
+  too, though only on Windows
+* To build: CMake, a C++17 compiler and wxWidgets 3.2 (see
+  [app/README.md](app/README.md#building))
 * [cpp-httplib](https://github.com/yhirose/cpp-httplib) 0.56.0 (MIT), vendored in
   `core/third_party/cpp-httplib`
 
 GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml))
 builds every push: the core on Linux, linked into a small smoke check that it
-runs, and the Windows app with MinGW. The built `Ultima III Assistant.exe` is attached to
-each run for 14 days.
+runs, and the Windows build with MSYS2; the Linux build is also started on a
+virtual screen. The Windows exe and the DLLs beside it are attached to each run
+for 14 days.
 
 ## License
 
