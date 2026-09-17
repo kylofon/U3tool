@@ -23,6 +23,17 @@ Features:
 	- Item lists show which character can use given item when hovering over that item's row.
 - Open windows and their positions are remembered between runs.
 
+## Screenshots
+
+The assistant beside the game in DOSBox, with the Spells, Armour and Weapons
+reference windows and the world map following the party through Britain:
+
+![Ultima III Assistant with the world map](screenshots/world-map.png)
+
+The Dungeon maps window showing a whole level of Dardin's Pit with **Reveal** on:
+
+![Ultima III Assistant with the dungeon map](screenshots/dungeon-map.png)
+
 ## Download
 
 Get `ultima3-assistant-<version>-win64.zip` from
