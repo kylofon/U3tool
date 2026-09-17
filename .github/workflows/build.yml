@@ -19,7 +19,7 @@ jobs:
       - name: Install wxWidgets
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwxgtk3.2-dev xvfb
+          sudo apt-get install -y --no-install-recommends libwxgtk3.2-dev xvfb shellcheck
 
       - name: Build
         run: |
@@ -65,6 +65,26 @@ jobs:
           status=$?
           echo "exit status $status"
           test $status -eq 124
+
+      # The launcher, checked with a game folder and an emulator that are both
+      # only pretending, so nothing has to be installed or started.
+      - name: Check the Linux launcher
+        run: |
+          shellcheck staging/play-in-dosbox-staging.sh
+          mkdir -p "$HOME/fake game/cloud_saves"
+          touch "$HOME/fake game/SOSARIA.ULT"
+          printf '#!/bin/sh\necho "dosbox-staging, version 0.83.0"\n' > "$HOME/fake-dosbox"
+          chmod +x "$HOME/fake-dosbox"
+          staging/play-in-dosbox-staging.sh --dry-run "$HOME/fake game" "$HOME/fake-dosbox" | tee /tmp/dry-run
+          grep -qF "mount c \"$HOME/fake game\"" /tmp/dry-run
+          grep -qF -- "-t overlay" /tmp/dry-run
+          grep -qF "assistant.conf" /tmp/dry-run
+          # An emulator too old for the API has to be refused.
+          printf '#!/bin/sh\necho "dosbox-staging, version 0.82.0"\n' > "$HOME/old-dosbox"
+          chmod +x "$HOME/old-dosbox"
+          if staging/play-in-dosbox-staging.sh --dry-run "$HOME/fake game" "$HOME/old-dosbox"; then
+            echo "an old DOSBox Staging should have been refused" && exit 1
+          fi
 
   windows:
     name: Windows

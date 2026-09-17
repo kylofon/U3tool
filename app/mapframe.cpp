@@ -14,6 +14,7 @@
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/timer.h>
+#include <wx/utils.h>
 
 #include <algorithm>
 #include <chrono>
@@ -31,12 +32,14 @@ using namespace u3;  // the map tables and helpers
 using Clock = std::chrono::steady_clock;
 
 constexpr int BLINK_MS = 500;
-const char* const DEFAULT_FOLDER =
+// Where the GOG release usually sits, until the running emulator says otherwise.
+wxString DefaultFolder() {
 #ifdef __WXMSW__
-    "C:\\Program Files (x86)\\GOG Galaxy\\Games\\Ultima 3";
+    return "C:\\Program Files (x86)\\GOG Galaxy\\Games\\Ultima 3";
 #else
-    "";
+    return wxGetHomeDir() + "/GOG Games/Ultima 3";
 #endif
+}
 
 const char* const TITLES[KIND_COUNT] = {"World map", "Dungeon maps"};
 const char* const PLACEMENT_KEYS[KIND_COUNT] = {"MapWorld", "MapDungeons"};
@@ -449,7 +452,7 @@ void MapFrame::OnClose(wxCloseEvent& event) {
 }  // namespace
 
 void Show(Kind kind, wxWindow* owner, bool topmost) {
-    if (g_folder.empty()) g_folder = settings::GetString("Game", "Folder", DEFAULT_FOLDER);
+    if (g_folder.empty()) g_folder = settings::GetString("Game", "Folder", DefaultFolder());
     if (MapFrame* open = g_frames[kind]) {
         if (open->IsIconized()) open->Iconize(false);
         open->Raise();
@@ -473,7 +476,7 @@ void SetTopmost(bool topmost) {
 }
 
 void UpdateLocation(const Location& where, const wxString& gameFolder) {
-    if (g_folder.empty()) g_folder = settings::GetString("Game", "Folder", DEFAULT_FOLDER);
+    if (g_folder.empty()) g_folder = settings::GetString("Game", "Folder", DefaultFolder());
     if (!gameFolder.empty() && gameFolder != g_folder) {
         g_folder = gameFolder;
         settings::SetString("Game", "Folder", gameFolder);
@@ -496,7 +499,7 @@ void UpdateLocation(const Location& where, const wxString& gameFolder) {
 }
 
 void RestoreOpenWindows(wxWindow* owner, bool topmost) {
-    if (g_folder.empty()) g_folder = settings::GetString("Game", "Folder", DEFAULT_FOLDER);
+    if (g_folder.empty()) g_folder = settings::GetString("Game", "Folder", DefaultFolder());
     for (int kind = 0; kind < KIND_COUNT; ++kind)
         if (settings::GetInt("Maps", OPEN_KEYS[kind], 0)) Show(static_cast<Kind>(kind), owner, topmost);
 }

@@ -53,9 +53,11 @@ few differences between Windows and Linux.
 It finds the party block by signature scan, so it works whatever address DOSBox
 happens to allocate, and keeps retrying until the game is running.
 
-To play in DOSBox Staging 0.83+ with its API on, run
-[`staging/Play in DOSBox Staging.cmd`](staging/). It uses the GOG install's
-config files unchanged, plus `staging/assistant.conf`. See
+To play in DOSBox Staging 0.83+ with its API on, run the launcher for your
+system from [`staging/`](staging/): `Play in DOSBox Staging.cmd` on Windows,
+which uses the GOG install's config files unchanged, or
+`play-in-dosbox-staging.sh` on Linux, which writes its own. Both add
+`staging/assistant.conf`, which turns the API on. See
 [Connecting to the game](app/README.md#connecting-to-the-game).
 
 The reverse-engineered `PARTY.ULT` / in-memory layout (BCD fields, item tables,

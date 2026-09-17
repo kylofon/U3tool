@@ -251,10 +251,21 @@ The assistant can reach the game in two ways, and tries them in this order:
    Port=8086
    ```
 
-   `..\staging\Play in DOSBox Staging.cmd` starts the GOG game in Staging with
-   the GOG config files unchanged, plus `..\staging\assistant.conf`, which turns
-   the API on. It looks for Staging in its default install folders; otherwise
-   pass the game folder and Staging's `dosbox.exe` as arguments.
+   The launchers in `..\staging` start the game in Staging with the API on,
+   adding `assistant.conf` from that folder:
+
+   * **Windows:** `Play in DOSBox Staging.cmd`, which uses the GOG install's
+     own config files unchanged. It looks for Staging where its installer puts
+     it; otherwise pass the game folder and Staging's `dosbox.exe` as
+     arguments.
+   * **Linux:** `play-in-dosbox-staging.sh`, which writes a small config of
+     its own (SVGA, 16 MB, 3000 cycles) since the GOG one is written for
+     Windows. It finds the game under `~/GOG Games` and the emulator on the
+     PATH or as the `io.github.dosbox-staging` Flatpak; otherwise pass the
+     folder and the binary as arguments, or set `ULTIMA3_DIR` and
+     `DOSBOX_STAGING`. `--dry-run` shows what it would run. It starts the
+     emulator from the game's folder, which is also how the assistant finds
+     the game's files.
 
 2. **DOSBox's process memory**, for the DOSBox 0.74 that GOG ships, or a
    Staging with the API off. It reads and writes any process with "dosbox" in
