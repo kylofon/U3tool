@@ -1,4 +1,4 @@
-# U3tool
+# Ultima III Assistant
 
 Live party stats and inventory for **Ultima III: Exodus** (the GOG DOS release
 running under DOSBox classic or DOSBox Staging), read straight out of the emulator's memory while you play.
@@ -26,7 +26,7 @@ Features:
 ## Download
 
 Get `ultima3-assistant-<version>-win64.zip` from
-[Releases](https://github.com/kylofon/U3tool/releases), unzip it anywhere and run
+[Releases](https://github.com/kylofon/ultima3-assistant/releases), unzip it anywhere and run
 `Ultima III Assistant.exe`. Start the game before or after; the assistant finds it by itself.
 The zip also has the `staging` folder for playing in DOSBox Staging (see below).
 

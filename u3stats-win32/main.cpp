@@ -784,7 +784,7 @@ void ShowAbout(HWND owner) {
     dialog.pszContent = L"A live party viewer and editor for Ultima III: Exodus.\n\n"
                         L"Author: Krzysztof Kania\n"
                         L"Website: <a href=\"https://kkania.com\">kkania.com</a>\n"
-                        L"Source: <a href=\"https://github.com/kylofon/U3tool\">github.com/kylofon/U3tool</a>\n"
+                        L"Source: <a href=\"https://github.com/kylofon/ultima3-assistant\">github.com/kylofon/ultima3-assistant</a>\n"
                         L"Support: <a href=\"https://buymeacoffee.com/krzysztofkania\">buymeacoffee.com/krzysztofkania</a>";
     dialog.pfCallback = AboutCallback;
     TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr);
